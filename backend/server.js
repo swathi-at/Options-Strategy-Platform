@@ -2,9 +2,8 @@
 
 const express = require('express');
 const cors = require('cors');
-// UPDATED: Import all the new functions
-const payoffFunctions = require('./payoffFunctions');
-
+// Import ALL payoff functions using the module name
+const payoffFunctions = require('./payoffFunctions'); 
 const app = express();
 
 app.use(cors());
@@ -23,7 +22,8 @@ app.post('/calculate', (req, res) => {
     
     const spotPrices = [];
     // Generate a range of spot prices from 15% below to 15% above the reference price
-    for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) { // Increased granularity
+    // Note: Using Math.round(s) ensures whole numbers for the spots
+    for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) { 
         spotPrices.push(Math.round(s));
     }
 
@@ -31,6 +31,7 @@ app.post('/calculate', (req, res) => {
     // UPDATED: Added all new strategies to the switch statement
     switch (strategy) {
         case 'long-call':
+            // Note: Single leg functions are called differently in your original code
             result = payoffFunctions.longCallPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
             break;
         case 'long-put':
@@ -39,7 +40,9 @@ app.post('/calculate', (req, res) => {
         case 'short-call':
             result = payoffFunctions.shortCallPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
             break;
-        // NEW: Cases for all added strategies
+        case 'short-put':
+            result = payoffFunctions.shortPutPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
+            break;
         case 'bull-call-spread':
             result = payoffFunctions.bullCallSpreadPayoff({ ...req.body, spotPrices });
             break;
@@ -64,6 +67,12 @@ app.post('/calculate', (req, res) => {
         case 'protective-call':
             result = payoffFunctions.protectiveCallPayoff({ ...req.body, spotPrices });
             break;
+        
+        // NEW: Long Strangle Case
+        case 'long-strangle':
+            result = payoffFunctions.longStranglePayoff({ ...req.body, spotPrices });
+            break;
+            
         default:
             return res.status(400).json({ error: 'Invalid strategy specified' });
     }

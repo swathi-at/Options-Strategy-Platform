@@ -1,57 +1,72 @@
-// backend/payoffFunctions.js
+// backend/payofffunctions.js
+
+// --- 1. CORE HELPER FUNCTIONS (Added for consistency) ---
+
+// Calculates P&L for a single LONG Call leg
+function callPayoff(spot, strike, premium) {
+    return Math.max(0, spot - strike) - premium;
+}
+
+// Calculates P&L for a single LONG Put leg
+function putPayoff(spot, strike, premium) {
+    return Math.max(0, strike - spot) - premium;
+}
+
+
+// --- 2. SINGLE LEG STRATEGIES (Your existing code) ---
 
 function longCallPayoff(strike, premium, lots, lotSize, spotPrices) {
-  const curve = [];
-  const totalPremium = premium * lots * lotSize;
+    const curve = [];
+    const totalPremium = premium * lots * lotSize;
 
-  spotPrices.forEach((spot) => {
-    const intrinsicValue = Math.max(0, spot - strike);
-    const pnl = (intrinsicValue * lotSize * lots) - totalPremium;
-    curve.push({ spot: spot, payoff: pnl });
-  });
+    spotPrices.forEach((spot) => {
+        const intrinsicValue = Math.max(0, spot - strike);
+        const pnl = (intrinsicValue * lotSize * lots) - totalPremium;
+        curve.push({ spot: spot, payoff: pnl });
+    });
 
-  return {
-    payoffCurve: curve,
-    maxProfit: "Unlimited",
-    maxLoss: -totalPremium,
-    breakeven: strike + premium,
-  };
+    return {
+        payoffCurve: curve,
+        maxProfit: "Unlimited",
+        maxLoss: -totalPremium,
+        breakeven: strike + premium,
+    };
 }
 
 function longPutPayoff(strike, premium, lots, lotSize, spotPrices) {
-  const curve = [];
-  const totalPremium = premium * lots * lotSize;
+    const curve = [];
+    const totalPremium = premium * lots * lotSize;
 
-  spotPrices.forEach((spot) => {
-    const intrinsicValue = Math.max(0, strike - spot);
-    const pnl = (intrinsicValue * lotSize * lots) - totalPremium;
-    curve.push({ spot: spot, payoff: pnl });
-  });
+    spotPrices.forEach((spot) => {
+        const intrinsicValue = Math.max(0, strike - spot);
+        const pnl = (intrinsicValue * lotSize * lots) - totalPremium;
+        curve.push({ spot: spot, payoff: pnl });
+    });
 
-  return {
-    payoffCurve: curve,
-    maxProfit: (strike * lotSize * lots) - totalPremium,
-    maxLoss: -totalPremium,
-    breakeven: strike - premium,
-  };
+    return {
+        payoffCurve: curve,
+        maxProfit: (strike * lotSize * lots) - totalPremium,
+        maxLoss: -totalPremium,
+        breakeven: strike - premium,
+    };
 }
 
 function shortCallPayoff(strike, premium, lots, lotSize, spotPrices) {
-  const curve = [];
-  const totalPremium = premium * lots * lotSize;
+    const curve = [];
+    const totalPremium = premium * lots * lotSize;
 
-  spotPrices.forEach((spot) => {
-    const intrinsicValue = Math.max(0, spot - strike);
-    const pnl = totalPremium - (intrinsicValue * lotSize * lots);
-    curve.push({ spot: spot, payoff: pnl });
-  });
+    spotPrices.forEach((spot) => {
+        const intrinsicValue = Math.max(0, spot - strike);
+        const pnl = totalPremium - (intrinsicValue * lotSize * lots);
+        curve.push({ spot: spot, payoff: pnl });
+    });
 
-  return {
-    payoffCurve: curve,
-    maxProfit: totalPremium,
-    maxLoss: "Unlimited",
-    breakeven: strike + premium,
-  };
+    return {
+        payoffCurve: curve,
+        maxProfit: totalPremium,
+        maxLoss: "Unlimited",
+        breakeven: strike + premium,
+    };
 }
 
 function shortPutPayoff(strike, premium, lots, lotSize, spotPrices) {
@@ -73,28 +88,30 @@ function shortPutPayoff(strike, premium, lots, lotSize, spotPrices) {
 }
 
 
-function bullCallSpreadPayoff(params) {
-  const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
-  
-  const longCall = longCallPayoff(strike1, premium1, lots, lotSize, spotPrices);
-  const shortCall = shortCallPayoff(strike2, premium2, lots, lotSize, spotPrices);
-  
-  const combinedCurve = longCall.payoffCurve.map((point, index) => ({
-    spot: point.spot,
-    payoff: point.payoff + shortCall.payoffCurve[index].payoff,
-  }));
+// --- 3. MULTI-LEG STRATEGIES (Your existing code) ---
 
-  const netPremium = premium1 - premium2;
-  const strikeDifference = strike2 - strike1;
-  const maxProfit = (strikeDifference - netPremium) * lots * lotSize;
-  const maxLoss = -(netPremium * lots * lotSize);
-  
-  return {
-    payoffCurve: combinedCurve,
-    maxProfit: maxProfit,
-    maxLoss: maxLoss,
-    breakeven: strike1 + netPremium,
-  };
+function bullCallSpreadPayoff(params) {
+    const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
+    
+    const longCall = longCallPayoff(strike1, premium1, lots, lotSize, spotPrices);
+    const shortCall = shortCallPayoff(strike2, premium2, lots, lotSize, spotPrices);
+    
+    const combinedCurve = longCall.payoffCurve.map((point, index) => ({
+        spot: point.spot,
+        payoff: point.payoff + shortCall.payoffCurve[index].payoff,
+    }));
+
+    const netPremium = premium1 - premium2;
+    const strikeDifference = strike2 - strike1;
+    const maxProfit = (strikeDifference - netPremium) * lots * lotSize;
+    const maxLoss = -(netPremium * lots * lotSize);
+    
+    return {
+        payoffCurve: combinedCurve,
+        maxProfit: maxProfit,
+        maxLoss: maxLoss,
+        breakeven: strike1 + netPremium,
+    };
 }
 
 function bullPutSpreadPayoff(params) {
@@ -232,7 +249,52 @@ function protectiveCallPayoff(params) {
     };
 }
 
+
+// --- 4. NEW STRATEGY: LONG STRANGLE PAYOFF (Revised for your structure) ---
+
+function longStranglePayoff(params) {
+    const { callStrike, putStrike, callPremium, putPremium, lots, lotSize, spotPrices } = params;
+
+    const totalCallPremium = callPremium * lots * lotSize;
+    const totalPutPremium = putPremium * lots * lotSize;
+    const totalPremiumPaid = totalCallPremium + totalPutPremium;
+    
+    const curve = [];
+    
+    spotPrices.forEach(spot => {
+        // P&L for Long Call leg (scaled)
+        const callIntrinsicValue = Math.max(0, spot - callStrike);
+        const callPnL = (callIntrinsicValue * lots * lotSize) - totalCallPremium;
+
+        // P&L for Long Put leg (scaled)
+        const putIntrinsicValue = Math.max(0, putStrike - spot);
+        const putPnL = (putIntrinsicValue * lots * lotSize) - totalPutPremium;
+
+        const combinedPnL = callPnL + putPnL;
+        curve.push({ spot, payoff: combinedPnL });
+    });
+
+    // Strategy-specific calculations
+    const upperBEP = callStrike + (totalPremiumPaid / (lots * lotSize));
+    const lowerBEP = putStrike - (totalPremiumPaid / (lots * lotSize));
+
+    return {
+        payoffCurve: curve,
+        maxProfit: "Unlimited", 
+        maxLoss: -totalPremiumPaid, 
+        breakeven: [upperBEP, lowerBEP], 
+    };
+}
+
+
+// --- 5. MODULE EXPORTS (Updated to include new functions) ---
+
 module.exports = { 
+    // New Helper Exports
+    callPayoff, 
+    putPayoff,
+
+    // Your Existing Strategy Exports
     longCallPayoff, 
     longPutPayoff, 
     shortCallPayoff,
@@ -244,5 +306,8 @@ module.exports = {
     syntheticLongStockPayoff,
     syntheticShortStockPayoff,
     protectivePutPayoff,
-    protectiveCallPayoff
+    protectiveCallPayoff,
+    
+
+    longStranglePayoff
 };
