@@ -19,10 +19,30 @@ const strategyConfigs = {
     // Other
     'short-call': { name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] },
     
-    // NEW NEUTRAL STRATEGY: LONG STRANGLE
+    // NEUTRAL STRATEGIES
+    'long-straddle': { 
+        name: 'Long Straddle', 
+        fields: ['strike', 'callPremium', 'putPremium', 'lots', 'lotSize'] 
+    },
     'long-strangle': { 
         name: 'Long Strangle', 
         fields: ['putStrike', 'putPremium', 'callStrike', 'callPremium', 'lots', 'lotSize'] 
+    },
+    'iron-condor': {
+        name: 'Iron Condor',
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize'] 
+    },
+    'iron-butterfly': {
+        name: 'Iron Butterfly',
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize']
+    },
+    'call-butterfly-spread': {
+        name: 'Call Butterfly Spread',
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize']
+    },
+    'calendar-spread': {
+        name: 'Calendar Spread',
+        fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize']
     }
 };
 
@@ -45,6 +65,16 @@ const formatLabel = (fieldName) => {
     if (fieldName === 'callStrike') return 'Call Strike (Higher)';
     if (fieldName === 'putStrike') return 'Put Strike (Lower)';
 
+    // Custom labels for complex spreads
+    if (fieldName === 'strike1') return 'Strike 1 (Lowest)';
+    if (fieldName === 'strike2') return 'Strike 2 (Middle)';
+    if (fieldName === 'strike3') return 'Strike 3 (Highest)';
+    if (fieldName === 'strike4') return 'Strike 4 (Outer)';
+
+    // Calendar Spread specific labels
+    if (fieldName === 'premium1') return 'Long Option Premium';
+    if (fieldName === 'premium2') return 'Short Option Premium';
+    
     // Generic formatting for others
     return fieldName.replace(/(\d+)/, ' $1').replace(/^\w/, c => c.toUpperCase());
 };
@@ -56,17 +86,21 @@ function App() {
         lotSize: 50, 
         strike: 100, 
         premium: 5,
-        putStrike: 90, // Default for Strangle
-        callStrike: 110, // Default for Strangle
-        putPremium: 2,   // Default for Strangle
-        callPremium: 2,  // Default for Strangle
+        putStrike: 90, 
+        callStrike: 110, 
+        putPremium: 2,   
+        callPremium: 2,  
+        // Defaults for Condor/Butterfly 
+        strike1: 90, premium1: 1, 
+        strike2: 95, premium2: 3, 
+        strike3: 105, premium3: 3, 
+        strike4: 110, premium4: 1, 
     }); 
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
 
     const handleStrategyChange = (e) => {
         setStrategy(e.target.value);
-        // Reset form but keep established defaults like lots and lotSize
         setForm(prev => ({ 
             ...prev, 
             lots: prev.lots || 1, 
@@ -84,16 +118,13 @@ function App() {
         try {
             const payload = {
                 strategy: strategy,
-                // Pass all parameters in the form state
                 ...form, 
             };
             
-            // NOTE: The previous code used port 5000. Use 3001 if your backend is there.
             const BACKEND_URL = 'http://localhost:5000/calculate'; 
             
             // Check if one of the strike fields required by the backend's spot price generator is present
-            // This is crucial for the backend to know what range to calculate.
-            if (!form.strike && !form.strike1 && !form.stockPrice && !form.putStrike) {
+            if (!form.strike && !form.strike1 && !form.strike2 && !form.stockPrice && !form.putStrike) {
                 console.error("Missing required strike/price for spot range generation.");
                 alert("Please fill in a required Strike or Stock Price value.");
                 setLoading(false);
@@ -101,7 +132,21 @@ function App() {
             }
 
             const res = await axios.post(BACKEND_URL, payload);
-            setData(res.data);
+            
+            let resultData = res.data;
+            
+            // FIX: Overrides theoretical max profit with the actual max profit shown on the graph 
+            if (strategy === 'long-put' || strategy === 'long-call') {
+                 if (resultData.payoffCurve && resultData.payoffCurve.length > 0) {
+                     const actualMaxProfit = resultData.payoffCurve.reduce((max, point) => Math.max(max, point.payoff), -Infinity);
+                     
+                     if (isFinite(actualMaxProfit) && resultData.maxProfit === 'Unlimited') {
+                         resultData = { ...resultData, maxProfit: actualMaxProfit };
+                     }
+                 }
+            }
+
+            setData(resultData);
             
         } catch (error) {
             console.error("Error fetching calculation:", error);
@@ -113,18 +158,17 @@ function App() {
 
     const formatBreakeven = (breakeven) => {
         if (Array.isArray(breakeven)) {
-            // For Straddle/Strangle, show both BEPs
-            const [upper, lower] = breakeven.map(b => b.toFixed(2));
-            return `Upper: ${upper}, Lower: ${lower}`;
+            const [lower, upper] = breakeven.map(b => b.toFixed(2));
+            return `Lower: ${lower}, Upper: ${upper}`;
         }
         if (typeof breakeven === 'number') {
             return breakeven.toFixed(2);
         }
-        return breakeven; // For "Unlimited", "Large", etc.
+        return breakeven; 
     };
 
     return (
-    <div className="p-4 md:p-8 max-w-7xl mx-auto font-sans bg-gray-50 min-h-screen">
+        <div className="p-4 md:p-8 max-w-7xl mx-auto font-sans bg-gray-50 min-h-screen">
             <script src="https://cdn.tailwindcss.com"></script>
             <h1 className="text-3xl font-extrabold mb-6 text-center text-gray-900 border-b-4 border-blue-600 pb-2">
                 Options Strategy Payoff Visualizer
@@ -148,7 +192,12 @@ function App() {
                         >
                             {/* Group strategies (optional, but good for UX) */}
                             <optgroup label="Neutral Strategies">
+                                <option value="long-straddle">{strategyConfigs['long-straddle'].name}</option>
                                 <option value="long-strangle">{strategyConfigs['long-strangle'].name}</option>
+                                <option value="iron-condor">{strategyConfigs['iron-condor'].name}</option> 
+                                <option value="iron-butterfly">{strategyConfigs['iron-butterfly'].name}</option>
+                                <option value="call-butterfly-spread">{strategyConfigs['call-butterfly-spread'].name}</option>
+                                <option value="calendar-spread">{strategyConfigs['calendar-spread'].name}</option>
                             </optgroup>
                             <optgroup label="Bullish Strategies">
                                 {Object.keys(strategyConfigs).filter(key => ['long-call', 'bull-call-spread', 'bull-put-spread', 'synthetic-long-stock', 'protective-put'].includes(key)).map(key => (
@@ -254,7 +303,6 @@ function App() {
                 </div>
             )}
             
-            {/* Tailwind utility styles for Chart zero line */}
             <style>
                 {`
                 .animate-fade-in {

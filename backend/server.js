@@ -1,5 +1,3 @@
-// backend/server.js
-
 const express = require('express');
 const cors = require('cors');
 // Import ALL payoff functions using the module name
@@ -11,10 +9,10 @@ app.use(express.json());
 
 app.post('/calculate', (req, res) => {
     // UPDATED: Destructure all possible parameters from the request body
-    const { strategy, strike, strike1, stockPrice } = req.body;
+    const { strategy, strike, strike1, strike2, stockPrice } = req.body;
 
     // UPDATED: Create a more robust reference strike for the spot price range.
-    const referenceStrike = strike || strike1 || stockPrice;
+    const referenceStrike = strike || strike1 || strike2 || stockPrice;
 
     if (!referenceStrike) {
         return res.status(400).json({ error: 'A valid strike or stock price is required.' });
@@ -68,9 +66,26 @@ app.post('/calculate', (req, res) => {
             result = payoffFunctions.protectiveCallPayoff({ ...req.body, spotPrices });
             break;
         
-        // NEW: Long Strangle Case
+        // NEUTRAL SPREADS
+        case 'long-straddle':
+            result = payoffFunctions.longStraddlePayoff({ ...req.body, spotPrices });
+            break;
         case 'long-strangle':
             result = payoffFunctions.longStranglePayoff({ ...req.body, spotPrices });
+            break;
+        case 'iron-condor':
+            result = payoffFunctions.ironCondorPayoff({ ...req.body, spotPrices });
+            break;
+        case 'iron-butterfly':
+            result = payoffFunctions.ironButterflyPayoff({ ...req.body, spotPrices });
+            break;
+        case 'call-butterfly-spread':
+            result = payoffFunctions.callButterflyPayoff({ ...req.body, spotPrices });
+            break;
+            
+        // NEW STRATEGY: CALENDAR SPREAD
+        case 'calendar-spread':
+            result = payoffFunctions.calendarSpreadPayoff({ ...req.body, spotPrices });
             break;
             
         default:
