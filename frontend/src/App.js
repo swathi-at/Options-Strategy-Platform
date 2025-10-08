@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import axios from "axios";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
 
-// NEW: Data is now structured in groups for the dropdown menu
 const strategyGroups = [
   {
     label: "Bullish Strategies",
@@ -37,6 +36,7 @@ const strategyGroups = [
     label: "Other Strategies",
     options: [
       { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] },
+      { value: 'short-put', name: 'Short Put', fields: ['strike', 'premium', 'lots', 'lotSize'] },
       { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
       { value: 'protective-call', name: 'Protective Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
       { value: 'synthetic-long-stock', name: 'Synthetic Long Stock', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
@@ -45,13 +45,20 @@ const strategyGroups = [
   }
 ];
 
-// This creates a flat map for easy lookup, so the rest of the code doesn't need to change
 const strategyConfigs = strategyGroups.flatMap(group => group.options).reduce((acc, option) => {
     acc[option.value] = { name: option.name, fields: option.fields };
     return acc;
 }, {});
 
-const formatLabel = (fieldName) => {
+const formatLabel = (fieldName, strategy) => {
+    if (strategy === 'calendar-spread') {
+        if (fieldName === 'premium1') return 'Long-Term Premium';
+        if (fieldName === 'premium2') return 'Short-Term Premium';
+    }
+     if (strategy === 'long-straddle' || strategy === 'short-straddle') {
+        if (fieldName === 'premium1') return 'Call Premium';
+        if (fieldName === 'premium2') return 'Put Premium';
+    }
     const labels = {
         lotSize: 'Lot Size',
         stockPrice: 'Stock Price',
@@ -105,7 +112,6 @@ function App() {
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
           <div className="col-span-2">
             <label htmlFor="strategy" className="block text-sm font-medium text-gray-700 mb-1">Strategy</label>
-            {/* UPDATED: The select element now uses optgroup for categorization */}
             <select
               id="strategy" name="strategy" value={strategy} onChange={handleStrategyChange}
               className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md shadow-sm"
@@ -124,7 +130,7 @@ function App() {
 
           {strategyConfigs[strategy].fields.map(field => (
             <div key={field} className="col-span-1">
-              <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-1">{formatLabel(field)}</label>
+              <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-1">{formatLabel(field, strategy)}</label>
               <input
                 type="number" id={field} name={field} value={form[field] || ''} onChange={handleChange}
                 className="mt-1 p-2 block w-full border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
@@ -153,14 +159,29 @@ function App() {
 
       {data && (
         <div className="mt-8 p-6 bg-white rounded-lg shadow-xl animate-fade-in">
-           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 text-center">
+           {/* UPDATED: Changed to a 3-column grid and added new percentage cards */}
+           <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6 text-center">
              <div className="p-4 bg-green-100 rounded">
                <p className="text-sm text-green-800 font-semibold">Max Profit</p>
                <p className="text-xl text-green-900 font-bold">{data.maxProfit}</p>
              </div>
+             {/* NEW: Max Profit % Card */}
+             <div className="p-4 bg-green-100 rounded">
+                <p className="text-sm text-green-800 font-semibold">Max Profit %</p>
+                <p className="text-xl text-green-900 font-bold">
+                    {typeof data.maxProfitPercentage === 'number' ? `${data.maxProfitPercentage.toFixed(2)}%` : data.maxProfitPercentage}
+                </p>
+             </div>
              <div className="p-4 bg-red-100 rounded">
                <p className="text-sm text-red-800 font-semibold">Max Loss</p>
                <p className="text-xl text-red-900 font-bold">{data.maxLoss}</p>
+             </div>
+             {/* NEW: Max Loss % Card */}
+             <div className="p-4 bg-red-100 rounded">
+                <p className="text-sm text-red-800 font-semibold">Max Loss %</p>
+                <p className="text-xl text-red-900 font-bold">
+                    {typeof data.maxLossPercentage === 'number' ? `${data.maxLossPercentage.toFixed(2)}%` : data.maxLossPercentage}
+                </p>
              </div>
              <div className="p-4 bg-yellow-100 rounded">
                <p className="text-sm text-yellow-800 font-semibold">Breakeven</p>
