@@ -234,24 +234,53 @@ function callButterflyPayoff(params) {
 
 function calendarSpreadPayoff(params) {
     const { strike, premium1, premium2, lots, lotSize, spotPrices } = params;
+    
+    // Calendar spread: Buy longer-term option (premium1), Sell shorter-term option (premium2)
+    // Net debit = premium paid for long option - premium received for short option
     const netDebit = premium1 - premium2;
     const totalNetDebit = netDebit * lots * lotSize;
-    const estimatedMaxProfit = (strike / 10) * lots * lotSize;
-    const maxLoss = totalNetDebit;
+    
     const curve = [];
+    
     spotPrices.forEach(spot => {
-        const deviation = Math.abs(spot - strike);
-        let profit = estimatedMaxProfit * Math.exp(-0.00015 * deviation * deviation);
-        if (profit < 0.05 * estimatedMaxProfit) {
-            profit = -maxLoss;
-        } else {
-            profit -= totalNetDebit;
-        }
-        curve.push({ spot, payoff: profit });
+        // At expiration of the short option:
+        // Long option still has time value (estimated as 30-50% of original premium)
+        // Short option expires with intrinsic value only
+        
+        // Calculate intrinsic value of short option at expiration
+        const shortOptionIntrinsic = Math.max(0, spot - strike); // Assuming call calendar spread
+        
+        // Estimate remaining time value of long option
+        // This is a simplified model - in reality, this depends on time to expiration and volatility
+        const longOptionTimeValue = premium1 * 0.4; // 40% of original premium as time value
+        const longOptionTotalValue = Math.max(0, spot - strike) + longOptionTimeValue;
+        
+        // P&L calculation
+        const shortOptionPnL = premium2 - shortOptionIntrinsic; // Premium received - intrinsic value paid
+        const longOptionPnL = longOptionTotalValue - premium1; // Current value - premium paid
+        const totalPnL = (shortOptionPnL + longOptionPnL) * lots * lotSize;
+        
+        curve.push({ spot, payoff: totalPnL });
     });
-    const lowerBEP = strike - (Math.sqrt(-Math.log(totalNetDebit / estimatedMaxProfit) / 0.00015) || 0);
-    const upperBEP = strike + (Math.sqrt(-Math.log(totalNetDebit / estimatedMaxProfit) / 0.00015) || 0);
-    return { payoffCurve: curve, maxProfit: estimatedMaxProfit - totalNetDebit, maxLoss: -maxLoss, breakeven: [lowerBEP.toFixed(2), upperBEP.toFixed(2)] };
+    
+    // Maximum loss occurs when both options expire worthless (spot far from strike)
+    const maxLoss = -totalNetDebit;
+    
+    // Maximum profit occurs when spot is at or near the strike price
+    // At strike, short option expires worthless, long option retains time value
+    const maxProfit = (premium2 + (premium1 * 0.4) - premium1) * lots * lotSize;
+    
+    // Breakeven points are more complex for calendar spreads
+    // Simplified calculation: where time decay benefits offset the net debit
+    const breakevenLower = strike - (totalNetDebit / (lots * lotSize));
+    const breakevenUpper = strike + (totalNetDebit / (lots * lotSize));
+    
+    return { 
+        payoffCurve: curve, 
+        maxProfit: Math.max(0, maxProfit), 
+        maxLoss: maxLoss, 
+        breakeven: [breakevenLower.toFixed(2), breakevenUpper.toFixed(2)] 
+    };
 }
 
 

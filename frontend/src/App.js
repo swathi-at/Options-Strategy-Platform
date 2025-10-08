@@ -28,7 +28,7 @@ const strategyGroups = [
       { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'strike2', 'strike3', 'strike4', 'netPremium', 'lots', 'lotSize'] },
       { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
       { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
-      { value: 'calendar-spread', name: 'Calendar Spread', fields: [] },
+      { value: 'calendar-spread', name: 'Calendar Spread', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
     ]
   },
   {
