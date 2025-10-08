@@ -232,6 +232,114 @@ function protectiveCallPayoff(params) {
     };
 }
 
+function longStraddlePayoff(params) {
+    const { strike, premium1, premium2, lots, lotSize, spotPrices } = params;
+    const totalPremium = premium1 + premium2;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        const callPayoff = Math.max(0, spot - strike) - premium1;
+        const putPayoff = Math.max(0, strike - spot) - premium2;
+        const pnl = (callPayoff + putPayoff) * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    return {
+        payoffCurve: curve,
+        maxProfit: "Unlimited",
+        maxLoss: -totalPremium * lots * lotSize,
+        breakeven: [strike - totalPremium, strike + totalPremium],
+    };
+}
+
+function longStranglePayoff(params) {
+    const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
+    const totalPremium = premium1 + premium2;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        const callPayoff = Math.max(0, spot - strike2) - premium2;
+        const putPayoff = Math.max(0, strike1 - spot) - premium1;
+        const pnl = (callPayoff + putPayoff) * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    return {
+        payoffCurve: curve,
+        maxProfit: "Unlimited",
+        maxLoss: -totalPremium * lots * lotSize,
+        breakeven: [strike1 - totalPremium, strike2 + totalPremium],
+    };
+}
+
+function ironCondorPayoff(params) {
+    const { strike1, strike2, strike3, strike4, netPremium, lots, lotSize, spotPrices } = params;
+    
+    const curve = [];
+    spotPrices.forEach(spot => {
+        const longPut = Math.max(0, strike1 - spot);
+        const shortPut = -Math.max(0, strike2 - spot);
+        const shortCall = -Math.max(0, spot - strike3);
+        const longCall = Math.max(0, spot - strike4);
+        const pnl = (longPut + shortPut + shortCall + longCall + netPremium) * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    const spreadWidth = strike2 - strike1;
+    
+    return {
+        payoffCurve: curve,
+        maxProfit: netPremium * lots * lotSize,
+        maxLoss: -(spreadWidth - netPremium) * lots * lotSize,
+        breakeven: [strike2 - netPremium, strike3 + netPremium],
+    };
+}
+
+function ironButterflyPayoff(params) {
+    const { strike1, strike2, strike3, netPremium, lots, lotSize, spotPrices } = params;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        const longPut = Math.max(0, strike1 - spot);
+        const shortPut = -Math.max(0, strike2 - spot);
+        const shortCall = -Math.max(0, spot - strike2);
+        const longCall = Math.max(0, spot - strike3);
+        const pnl = (longPut + shortPut + shortCall + longCall + netPremium) * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    const spreadWidth = strike3 - strike2;
+
+    return {
+        payoffCurve: curve,
+        maxProfit: netPremium * lots * lotSize,
+        maxLoss: -(spreadWidth - netPremium) * lots * lotSize,
+        breakeven: [strike2 - netPremium, strike2 + netPremium],
+    };
+}
+
+function callButterflyPayoff(params) {
+    const { strike1, strike2, strike3, netPremium, lots, lotSize, spotPrices } = params;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        const longCall1 = Math.max(0, spot - strike1);
+        const shortCall2 = -2 * Math.max(0, spot - strike2);
+        const longCall3 = Math.max(0, spot - strike3);
+        const pnl = (longCall1 + shortCall2 + longCall3 - netPremium) * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+    
+    const spreadWidth = strike2 - strike1;
+
+    return {
+        payoffCurve: curve,
+        maxProfit: (spreadWidth - netPremium) * lots * lotSize,
+        maxLoss: -netPremium * lots * lotSize,
+        breakeven: [strike1 + netPremium, strike3 - netPremium],
+    };
+}
+
 module.exports = { 
     longCallPayoff, 
     longPutPayoff, 
@@ -244,5 +352,10 @@ module.exports = {
     syntheticLongStockPayoff,
     syntheticShortStockPayoff,
     protectivePutPayoff,
-    protectiveCallPayoff
+    protectiveCallPayoff,
+    longStraddlePayoff,
+    longStranglePayoff,
+    ironCondorPayoff,
+    ironButterflyPayoff,
+    callButterflyPayoff,
 };

@@ -1,34 +1,28 @@
 // backend/server.js
-
 const express = require('express');
 const cors = require('cors');
-// UPDATED: Import all the new functions
 const payoffFunctions = require('./payoffFunctions');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 app.post('/calculate', (req, res) => {
-    // UPDATED: Destructure all possible parameters from the request body
-    const { strategy, strike, strike1, stockPrice } = req.body;
+    const { strategy, strike, strike1, strike2, stockPrice } = req.body;
 
-    // UPDATED: Create a more robust reference strike for the spot price range.
-    const referenceStrike = strike || strike1 || stockPrice;
+    // Use the middle strike for butterflies/condors as the reference
+    const referenceStrike = strike || strike2 || strike1 || stockPrice;
 
     if (!referenceStrike) {
         return res.status(400).json({ error: 'A valid strike or stock price is required.' });
     }
     
     const spotPrices = [];
-    // Generate a range of spot prices from 15% below to 15% above the reference price
-    for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) { // Increased granularity
+    for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) {
         spotPrices.push(Math.round(s));
     }
 
     let result;
-    // UPDATED: Added all new strategies to the switch statement
     switch (strategy) {
         case 'long-call':
             result = payoffFunctions.longCallPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
@@ -39,7 +33,6 @@ app.post('/calculate', (req, res) => {
         case 'short-call':
             result = payoffFunctions.shortCallPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
             break;
-        // NEW: Cases for all added strategies
         case 'bull-call-spread':
             result = payoffFunctions.bullCallSpreadPayoff({ ...req.body, spotPrices });
             break;
@@ -64,8 +57,30 @@ app.post('/calculate', (req, res) => {
         case 'protective-call':
             result = payoffFunctions.protectiveCallPayoff({ ...req.body, spotPrices });
             break;
+        case 'long-straddle':
+            result = payoffFunctions.longStraddlePayoff({ ...req.body, spotPrices });
+            break;
+        case 'long-strangle':
+            result = payoffFunctions.longStranglePayoff({ ...req.body, spotPrices });
+            break;
+        case 'iron-condor':
+            result = payoffFunctions.ironCondorPayoff({ ...req.body, spotPrices });
+            break;
+        case 'iron-butterfly':
+            result = payoffFunctions.ironButterflyPayoff({ ...req.body, spotPrices });
+            break;
+        case 'call-butterfly':
+            result = payoffFunctions.callButterflyPayoff({ ...req.body, spotPrices });
+            break;
+        case 'calendar-spread':
+            return res.status(400).json({ error: 'Calendar spread payoff depends on time decay and volatility, and cannot be graphed with this tool.' });
         default:
             return res.status(400).json({ error: 'Invalid strategy specified' });
+    }
+
+    // For breakeven points that have two values, format them for display
+    if (Array.isArray(result.breakeven)) {
+        result.breakeven = `${result.breakeven[0]} & ${result.breakeven[1]}`;
     }
 
     res.json(result);
