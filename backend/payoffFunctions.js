@@ -57,7 +57,9 @@ function shortPutPayoff(strike, premium, lots, lotSize, spotPrices) {
         const pnl = totalPremium - (intrinsicValue * lotSize * lots);
         curve.push({ spot: spot, payoff: pnl });
     });
-    return { payoffCurve: curve, maxProfit: totalPremium, maxLoss: (strike * lotSize * lots) - totalPremium, breakeven: strike - premium };
+    // Max loss occurs when spot price is 0 (for a single contract, this is Strike - Premium)
+    const maxLossValue = (strike * lots * lotSize) - totalPremium; 
+    return { payoffCurve: curve, maxProfit: totalPremium, maxLoss: -maxLossValue, breakeven: strike - premium };
 }
 
 
@@ -67,6 +69,7 @@ function bullCallSpreadPayoff(params) {
     const netPremium = premium1 - premium2;
     const curve = [];
     spotPrices.forEach(spot => {
+        // Long Call 1 - Long Call 2 (Debit Spread)
         const pnl = (callPayoff(spot, strike1, premium1) - callPayoff(spot, strike2, premium2)) * lots * lotSize;
         curve.push({ spot, payoff: pnl });
     });
@@ -78,6 +81,7 @@ function bullPutSpreadPayoff(params) {
     const netPremium = premium1 - premium2;
     const curve = [];
     spotPrices.forEach(spot => {
+        // Short Put 1 + Long Put 2 (Credit Spread)
         const shortPutPnL = (premium1 - Math.max(0, strike1 - spot)) * lots * lotSize;
         const longPutPnL = (-premium2 + Math.max(0, strike2 - spot)) * lots * lotSize;
         curve.push({ spot, payoff: shortPutPnL + longPutPnL });
@@ -90,6 +94,7 @@ function bearCallSpreadPayoff(params) {
     const netPremium = premium1 - premium2;
     const curve = [];
     spotPrices.forEach(spot => {
+        // Short Call 1 + Long Call 2 (Credit Spread)
         const shortCallPnL = (premium1 - Math.max(0, spot - strike1)) * lots * lotSize;
         const longCallPnL = (-premium2 + Math.max(0, spot - strike2)) * lots * lotSize;
         curve.push({ spot, payoff: shortCallPnL + longCallPnL });
@@ -102,6 +107,7 @@ function bearPutSpreadPayoff(params) {
     const netPremium = premium1 - premium2;
     const curve = [];
     spotPrices.forEach(spot => {
+        // Long Put 1 - Short Put 2 (Debit Spread)
         const longPutPnL = (-premium1 + Math.max(0, strike1 - spot)) * lots * lotSize;
         const shortPutPnL = (premium2 - Math.max(0, strike2 - spot)) * lots * lotSize;
         curve.push({ spot, payoff: longPutPnL + shortPutPnL });
@@ -175,11 +181,45 @@ function longStraddlePayoff(params) {
     return { payoffCurve: curve, maxProfit: "Unlimited", maxLoss: -totalPremium * lots * lotSize, breakeven: [strike - totalPremium, strike + totalPremium] };
 }
 
+/**
+ * NEW STRATEGY: Short Straddle
+ * Sells 1 ATM Call (Strike, Premium1) & Sells 1 ATM Put (Strike, Premium2)
+ */
+function shortStraddlePayoff(params) {
+    const { strike, premium1, premium2, lots, lotSize, spotPrices } = params;
+    const totalPremium = premium1 + premium2;
+    const totalCredit = totalPremium * lots * lotSize;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        // P&L = Premium Received - Intrinsic Value of exercised options
+        const shortCallIntrinsicLoss = Math.max(0, spot - strike);
+        const shortPutIntrinsicLoss = Math.max(0, strike - spot);
+        
+        const pnlPerShare = totalPremium - shortCallIntrinsicLoss - shortPutIntrinsicLoss;
+        const pnl = pnlPerShare * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    // Breakeven Points: Strike +/- Total Premium
+    const upperBEP = strike + totalPremium;
+    const lowerBEP = strike - totalPremium;
+
+    return { 
+        payoffCurve: curve, 
+        maxProfit: totalCredit, 
+        maxLoss: "Unlimited", 
+        breakeven: [lowerBEP, upperBEP] 
+    };
+}
+
+
 function longStranglePayoff(params) {
     const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
     const totalPremium = premium1 + premium2;
     const curve = [];
     spotPrices.forEach(spot => {
+        // Note: Strike2 is higher (Call), Strike1 is lower (Put)
         const callPayoffVal = Math.max(0, spot - strike2) - premium2;
         const putPayoffVal = Math.max(0, strike1 - spot) - premium1;
         const pnl = (callPayoffVal + putPayoffVal) * lots * lotSize;
@@ -188,14 +228,55 @@ function longStranglePayoff(params) {
     return { payoffCurve: curve, maxProfit: "Unlimited", maxLoss: -totalPremium * lots * lotSize, breakeven: [strike1 - totalPremium, strike2 + totalPremium] };
 }
 
+/**
+ * NEW STRATEGY: Short Strangle
+ * Sells 1 OTM Call (Strike2, Premium2) & Sells 1 OTM Put (Strike1, Premium1)
+ */
+function shortStranglePayoff(params) {
+    const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
+    const totalPremium = premium1 + premium2;
+    const totalCredit = totalPremium * lots * lotSize;
+
+    const curve = [];
+    spotPrices.forEach(spot => {
+        // P&L = Premium Received - Intrinsic Value of exercised options
+        // Strike2 is the Call Strike, Strike1 is the Put Strike
+        const shortCallIntrinsicLoss = Math.max(0, spot - strike2);
+        const shortPutIntrinsicLoss = Math.max(0, strike1 - spot);
+        
+        const pnlPerShare = totalPremium - shortCallIntrinsicLoss - shortPutIntrinsicLoss;
+        const pnl = pnlPerShare * lots * lotSize;
+        curve.push({ spot, payoff: pnl });
+    });
+
+    // Breakeven Points: Put Strike - Total Premium (Lower), Call Strike + Total Premium (Upper)
+    const lowerBEP = strike1 - totalPremium;
+    const upperBEP = strike2 + totalPremium;
+    
+    return { 
+        payoffCurve: curve, 
+        maxProfit: totalCredit, 
+        maxLoss: "Unlimited", 
+        breakeven: [lowerBEP, upperBEP] 
+    };
+}
+
+
 function ironCondorPayoff(params) {
     const { strike1, strike2, strike3, strike4, netPremium, lots, lotSize, spotPrices } = params;
     const curve = [];
     spotPrices.forEach(spot => {
-        const longPut = Math.max(0, strike1 - spot);
+        // This P&L calculation relies on a pre-calculated netPremium, which is fine for the demo.
+        // It's P&L = (Option Payoffs) + Net Credit
+        const longPut = Math.max(0, strike1 - spot); // assuming long put is lowest strike
         const shortPut = -Math.max(0, strike2 - spot);
         const shortCall = -Math.max(0, spot - strike3);
-        const longCall = Math.max(0, spot - strike4);
+        const longCall = Math.max(0, spot - strike4); // assuming long call is highest strike
+        
+        // Note: The strike order here (strike1 < strike2 < strike3 < strike4) is inverted 
+        // compared to the standard visualizer convention (S1, S2, S3, S4 are often S4, S3, S2, S1 for Call Spread / Put Spread notation).
+        // Sticking to the code's current strike logic:
+        // strike1 (Long Put) < strike2 (Short Put) < strike3 (Short Call) < strike4 (Long Call)
         const pnl = (longPut + shortPut + shortCall + longCall + netPremium) * lots * lotSize;
         curve.push({ spot, payoff: pnl });
     });
@@ -236,44 +317,29 @@ function calendarSpreadPayoff(params) {
     const { strike, premium1, premium2, lots, lotSize, spotPrices } = params;
     
     // Calendar spread: Buy longer-term option (premium1), Sell shorter-term option (premium2)
-    // Net debit = premium paid for long option - premium received for short option
     const netDebit = premium1 - premium2;
     const totalNetDebit = netDebit * lots * lotSize;
     
     const curve = [];
     
     spotPrices.forEach(spot => {
-        // At expiration of the short option:
-        // Long option still has time value (estimated as 30-50% of original premium)
-        // Short option expires with intrinsic value only
-        
-        // Calculate intrinsic value of short option at expiration
-        const shortOptionIntrinsic = Math.max(0, spot - strike); // Assuming call calendar spread
-        
-        // Estimate remaining time value of long option
-        // This is a simplified model - in reality, this depends on time to expiration and volatility
-        const longOptionTimeValue = premium1 * 0.4; // 40% of original premium as time value
+        // --- Simplistic estimation for P&L at short option expiration ---
+        const longOptionTimeValue = premium1 * 0.4; // 40% of original premium as time value (simplistic)
         const longOptionTotalValue = Math.max(0, spot - strike) + longOptionTimeValue;
         
-        // P&L calculation
-        const shortOptionPnL = premium2 - shortOptionIntrinsic; // Premium received - intrinsic value paid
-        const longOptionPnL = longOptionTotalValue - premium1; // Current value - premium paid
-        const totalPnL = (shortOptionPnL + longOptionPnL) * lots * lotSize;
+        // P&L calculation: (Value of Long Option + Premium of Short Option) - Premium of Long Option
+        const totalPnL = (longOptionTotalValue + premium2 - premium1) * lots * lotSize;
         
         curve.push({ spot, payoff: totalPnL });
     });
     
-    // Maximum loss occurs when both options expire worthless (spot far from strike)
     const maxLoss = -totalNetDebit;
-    
-    // Maximum profit occurs when spot is at or near the strike price
-    // At strike, short option expires worthless, long option retains time value
     const maxProfit = (premium2 + (premium1 * 0.4) - premium1) * lots * lotSize;
     
-    // Breakeven points are more complex for calendar spreads
-    // Simplified calculation: where time decay benefits offset the net debit
-    const breakevenLower = strike - (totalNetDebit / (lots * lotSize));
-    const breakevenUpper = strike + (totalNetDebit / (lots * lotSize));
+    // Breakeven points: Strike +/- a value related to the net debit (approximation)
+    const breakevenValue = totalNetDebit / (lots * lotSize);
+    const breakevenLower = strike - breakevenValue;
+    const breakevenUpper = strike + breakevenValue;
     
     return { 
         payoffCurve: curve, 
@@ -290,6 +356,8 @@ module.exports = {
     longCallPayoff, longPutPayoff, shortCallPayoff, shortPutPayoff, 
     bullCallSpreadPayoff, bullPutSpreadPayoff, bearCallSpreadPayoff, bearPutSpreadPayoff,
     syntheticLongStockPayoff, syntheticShortStockPayoff, protectivePutPayoff, protectiveCallPayoff,
-    longStraddlePayoff, longStranglePayoff, ironCondorPayoff, ironButterflyPayoff, callButterflyPayoff, 
+    longStraddlePayoff, shortStraddlePayoff, // ADDED
+    longStranglePayoff, shortStranglePayoff, // ADDED
+    ironCondorPayoff, ironButterflyPayoff, callButterflyPayoff, 
     calendarSpreadPayoff
 };

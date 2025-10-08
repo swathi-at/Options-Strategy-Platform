@@ -1,4 +1,3 @@
-// backend/server.js
 const express = require('express');
 const cors = require('cors');
 const payoffFunctions = require('./payoffFunctions');
@@ -8,6 +7,8 @@ app.use(cors());
 app.use(express.json());
 
 app.post('/calculate', (req, res) => {
+    // Note: The referenceStrike logic handles finding a central price for graph generation,
+    // prioritizing single strike (strike), then a spread strike (strike2/strike1), then stockPrice.
     const { strategy, strike, strike1, strike2, stockPrice } = req.body;
 
     const referenceStrike = strike || strike2 || strike1 || stockPrice;
@@ -16,9 +17,11 @@ app.post('/calculate', (req, res) => {
         return res.status(400).json({ error: 'A valid strike or stock price is required.' });
     }
     
+    // Generate spot prices for the payoff curve (15% below to 15% above the reference price)
     const spotPrices = [];
     for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) {
-        spotPrices.push(Math.round(s));
+        // Ensure integer spots for cleaner graph labels, you might use s += 0.5 for finer resolution
+        spotPrices.push(Math.round(s)); 
     }
 
     let result;
@@ -62,9 +65,17 @@ app.post('/calculate', (req, res) => {
         case 'long-straddle':
             result = payoffFunctions.longStraddlePayoff({ ...req.body, spotPrices });
             break;
+        // --- NEW STRATEGIES ADDED ---
+        case 'short-straddle': // FIX: Added the missing case
+            result = payoffFunctions.shortStraddlePayoff({ ...req.body, spotPrices });
+            break;
         case 'long-strangle':
             result = payoffFunctions.longStranglePayoff({ ...req.body, spotPrices });
             break;
+        case 'short-strangle': // FIX: Added the missing case
+            result = payoffFunctions.shortStranglePayoff({ ...req.body, spotPrices });
+            break;
+        // --- END NEW STRATEGIES ---
         case 'iron-condor':
             result = payoffFunctions.ironCondorPayoff({ ...req.body, spotPrices });
             break;
@@ -81,9 +92,14 @@ app.post('/calculate', (req, res) => {
             return res.status(400).json({ error: 'Invalid strategy specified' });
     }
 
-    // For breakeven points that have two values, format them for display
+    // For breakeven points that have two values (which are returned as an array), 
+    // format them into a single string for cleaner frontend display (e.g., "103 & 97")
     if (Array.isArray(result.breakeven)) {
-        result.breakeven = `${result.breakeven[0]} & ${result.breakeven[1]}`;
+        // Ensure values are rounded to 2 decimal places before joining, if they aren't already
+        const formattedBreakeven = result.breakeven.map(be => 
+            (typeof be === 'number') ? be.toFixed(2) : be
+        );
+        result.breakeven = `${formattedBreakeven[0]} & ${formattedBreakeven[1]}`;
     }
 
     res.json(result);

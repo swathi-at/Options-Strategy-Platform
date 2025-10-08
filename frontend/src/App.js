@@ -24,7 +24,9 @@ const strategyGroups = [
     label: "Neutral Strategies",
     options: [
       { value: 'long-straddle', name: 'Long Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
+      { value: 'short-straddle', name: 'Short Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
       { value: 'long-strangle', name: 'Long Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+      { value: 'short-strangle', name: 'Short Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
       { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'strike2', 'strike3', 'strike4', 'netPremium', 'lots', 'lotSize'] },
       { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
       { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
