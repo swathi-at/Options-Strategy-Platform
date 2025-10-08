@@ -10,7 +10,6 @@ app.use(express.json());
 app.post('/calculate', (req, res) => {
     const { strategy, strike, strike1, strike2, stockPrice } = req.body;
 
-    // Use the middle strike for butterflies/condors as the reference
     const referenceStrike = strike || strike2 || strike1 || stockPrice;
 
     if (!referenceStrike) {
@@ -32,6 +31,9 @@ app.post('/calculate', (req, res) => {
             break;
         case 'short-call':
             result = payoffFunctions.shortCallPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
+            break;
+        case 'short-put':
+            result = payoffFunctions.shortPutPayoff(req.body.strike, req.body.premium, req.body.lots, req.body.lotSize, spotPrices);
             break;
         case 'bull-call-spread':
             result = payoffFunctions.bullCallSpreadPayoff({ ...req.body, spotPrices });
@@ -73,7 +75,8 @@ app.post('/calculate', (req, res) => {
             result = payoffFunctions.callButterflyPayoff({ ...req.body, spotPrices });
             break;
         case 'calendar-spread':
-            return res.status(400).json({ error: 'Calendar spread payoff depends on time decay and volatility, and cannot be graphed with this tool.' });
+            result = payoffFunctions.calendarSpreadPayoff({ ...req.body, spotPrices });
+            break;
         default:
             return res.status(400).json({ error: 'Invalid strategy specified' });
     }
