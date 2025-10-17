@@ -4,7 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 
 // --- Helper for Gemini API ---
 // IMPORTANT: Leave the API key as an empty string.
-const API_KEY = "AIzaSyDoT2XZg9xo-Cm4VX-Gc8NgYj3ieGDpP24";
+const API_KEY = ""; 
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${API_KEY}`;
 
 const strategyGroups = [
@@ -108,6 +108,7 @@ function App() {
   };
 
   const handleSubmit = async () => {
+    setData(null);
     setError(null);
     setAnalysis("");
     setIsLoading(true);
@@ -116,7 +117,6 @@ function App() {
       const res = await axios.post('http://localhost:5000/calculate', payload);
       setData(res.data);
     } catch (err) {
-      setData(null); 
       setError(err.response ? err.response.data.error : "An error occurred.");
     } finally {
       setIsLoading(false);
@@ -310,4 +310,6 @@ function App() {
 }
 
 export default App;
+
+
 
