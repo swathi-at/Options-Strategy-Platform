@@ -123,7 +123,7 @@ function App() {
     setIsLoading(true);
     try {
       const payload = { strategy, ...form };
-      const res = await axios.post('http://localhost:5000/calculate', payload);
+      const res = await axios.post('https://options-strategy-api.onrender.com/calculate', payload);
       setData(res.data);
     } catch (err) {
       setData(null); 
