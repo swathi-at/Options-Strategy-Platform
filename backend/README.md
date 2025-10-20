@@ -44,4 +44,4 @@ This backend server provides a single API endpoint to calculate the payoff curve
     "maxProfitPercentage": 150,
     "maxLossPercentage": -100
 }
-```
+```  gt

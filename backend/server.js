@@ -3,7 +3,7 @@
 const express = require('express');
 const cors = require('cors');
 // --- NEW: Import the engine ---
-const { calculateStrategy } = require('./strategyengine'); 
+const { calculateStrategy } = require('./strategyengine');
 
 const app = express();
 app.use(cors());

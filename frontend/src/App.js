@@ -1,11 +1,15 @@
+// src/App.js
+
 import React, { useState } from "react";
 import axios from "axios";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 
 // --- Helper for Gemini API ---
-// IMPORTANT: Leave the API key as an empty string.
-const API_KEY = "AIzaSyDoT2XZg9xo-Cm4VX-Gc8NgYj3ieGDpP24";
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${API_KEY}`;
+// IMPORTANT: Leave the API key as an empty string for security.
+// It is best practice to handle API keys on a backend server or via environment variables, not in frontend code.
+const API_KEY = "YOUR_API_KEY_HERE"; // Replace with your actual key for testing
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}`;
+
 
 const strategyGroups = [
   {
@@ -43,7 +47,7 @@ const strategyGroups = [
       { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] },
       { value: 'short-put', name: 'Short Put', fields: ['strike', 'premium', 'lots', 'lotSize'] },
       { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
-      { value: 'protective-call', name: 'Protective Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
+      { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] }, // Renamed for clarity
       { value: 'synthetic-long-stock', name: 'Synthetic Long Stock', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
       { value: 'synthetic-short-stock', name: 'Synthetic Short Stock', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
     ]
@@ -55,21 +59,30 @@ const strategyConfigs = strategyGroups.flatMap(group => group.options).reduce((a
     return acc;
 }, {});
 
+// FIXED: Added more specific labels for clarity
 const formatLabel = (fieldName, strategy) => {
+    // Strategy-specific overrides
     if (strategy === 'calendar-spread') {
         if (fieldName === 'premium1') return 'Long-Term Premium';
         if (fieldName === 'premium2') return 'Short-Term Premium';
     }
-     if (strategy === 'long-straddle' || strategy === 'short-straddle') {
+    if (strategy === 'long-straddle' || strategy === 'short-straddle') {
         if (fieldName === 'premium1') return 'Call Premium';
         if (fieldName === 'premium2') return 'Put Premium';
     }
+    if (strategy === 'synthetic-long-stock' || strategy === 'synthetic-short-stock') {
+        if (fieldName === 'premium') return 'Call Premium';
+        if (fieldName === 'premium2') return 'Put Premium';
+    }
+
+    // General labels
     const labels = {
         lotSize: 'Lot Size',
         stockPrice: 'Stock Price',
         premium: 'Premium',
-        premium1: 'Premium 1 (Call/Put)',
-        premium2: 'Premium 2 (Call/Put)',
+        premium1: 'Premium 1',
+        premium2: 'Premium 2',
+        strike: 'Strike',
         strike1: 'Strike 1',
         strike2: 'Strike 2',
         strike3: 'Strike 3',
@@ -97,14 +110,18 @@ function App() {
   };
 
   const handleChange = (e) => {
-    setForm({ ...form, [e.target.name]: Number(e.target.value) });
+    setForm({ ...form, [e.target.name]: e.target.value ? Number(e.target.value) : '' });
   };
   
   const handleReset = () => {
+    const currentStrategy = strategy;
     setForm({ lots: 1, lotSize: 50 });
     setData(null);
     setError(null);
     setAnalysis("");
+    // This ensures the form fields for the current strategy are cleared
+    setStrategy(''); 
+    setTimeout(() => setStrategy(currentStrategy), 0);
   };
 
   const handleSubmit = async () => {
@@ -124,14 +141,17 @@ function App() {
   };
   
   const handleAnalysis = async () => {
-      if (!data) return;
+      if (!data || !API_KEY || API_KEY === "YOUR_API_KEY_HERE") {
+          setAnalysis("Please add your Gemini API Key in the App.js file to use this feature.");
+          return;
+      }
       setIsAnalyzing(true);
       setAnalysis("");
       
       const strategyName = strategyConfigs[strategy].name;
       const prompt = `
         As a professional options trading analyst, provide a clear, concise analysis for the following options strategy. 
-        Structure your response in three parts: 
+        Structure your response in three parts with markdown headings: 
         1. **Strategy Overview:** Briefly explain what this strategy is and its goal.
         2. **Market Outlook:** Describe the ideal market condition (e.g., bullish, bearish, neutral, high/low volatility) for this trade to be profitable.
         3. **Risk Profile:** Explain the risk involved, referencing the calculated max profit and loss.
@@ -143,7 +163,7 @@ function App() {
         - Maximum Loss: ${data.maxLoss}
         - Breakeven Point(s): ${data.breakeven}
 
-        Provide the analysis in clean, easy-to-read paragraphs.
+        Provide the analysis in clean, easy-to-read paragraphs. Do not repeat the input parameters in your analysis.
       `;
 
       try {
@@ -153,6 +173,10 @@ function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
+        if (!response.ok) {
+            const errorBody = await response.json();
+            throw new Error(errorBody.error?.message || "API request failed");
+        }
         const result = await response.json();
         const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) {
@@ -162,10 +186,21 @@ function App() {
         }
       } catch (error) {
           console.error("Gemini API Error:", error);
-          setAnalysis("An error occurred while fetching the analysis from the Gemini API.");
+          setAnalysis(`An error occurred while fetching the analysis: ${error.message}`);
       } finally {
           setIsAnalyzing(false);
       }
+  };
+
+  // Helper to safely format numbers and strings for display
+  const formatValue = (value) => {
+      if (typeof value === 'number') {
+          return value.toLocaleString('en-US', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+          });
+      }
+      return value;
   };
 
   return (
@@ -193,7 +228,7 @@ function App() {
             </select>
           </div>
 
-          {strategyConfigs[strategy].fields.map(field => (
+          {strategy && strategyConfigs[strategy]?.fields.map(field => (
             <div key={field} className="col-span-1">
               <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-1">{formatLabel(field, strategy)}</label>
               <input
@@ -215,7 +250,7 @@ function App() {
               }`}
             >
               {isLoading 
-                ? (data ? 'Recalculating...' : 'Calculating...') 
+                ? 'Calculating...'
                 : (data ? 'Recalculate' : 'Calculate')}
             </button>
              <button 
@@ -255,7 +290,7 @@ function App() {
                 {isAnalyzing ? (
                     <p className="text-purple-700">Generating analysis, please wait...</p>
                 ) : (
-                    <div className="text-gray-700 whitespace-pre-wrap font-mono" dangerouslySetInnerHTML={{ __html: analysis.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br />') }} />
+                    <div className="text-gray-700 whitespace-pre-wrap prose" dangerouslySetInnerHTML={{ __html: analysis.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br />') }} />
                 )}
             </div>
           )}
@@ -263,7 +298,7 @@ function App() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6 text-center">
             <div className="p-4 bg-green-100 rounded">
               <p className="text-sm text-green-800 font-semibold">Max Profit</p>
-              <p className="text-xl text-green-900 font-bold">{data.maxProfit}</p>
+              <p className="text-xl text-green-900 font-bold">{formatValue(data.maxProfit)}</p>
             </div>
             <div className="p-4 bg-green-100 rounded">
               <p className="text-sm text-green-800 font-semibold">Max Profit %</p>
@@ -273,7 +308,7 @@ function App() {
             </div>
             <div className="p-4 bg-red-100 rounded">
               <p className="text-sm text-red-800 font-semibold">Max Loss</p>
-              <p className="text-xl text-red-900 font-bold">{data.maxLoss}</p>
+              <p className="text-xl text-red-900 font-bold">{formatValue(data.maxLoss)}</p>
             </div>
             <div className="p-4 bg-red-100 rounded">
               <p className="text-sm text-red-800 font-semibold">Max Loss %</p>
@@ -291,13 +326,13 @@ function App() {
             </div>
           </div>
           
-          <div className="w-full" style={{ height: '300px' }}>
+          <div className="w-full" style={{ height: '400px' }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data.payoffCurve}>
+              <LineChart data={data.payoffCurve} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="spot" name="Spot Price" />
-                <YAxis />
-                <Tooltip />
+                <YAxis tickFormatter={(tick) => tick.toLocaleString()} />
+                <Tooltip formatter={(value) => value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} />
                 <ReferenceLine y={0} stroke="#000" strokeDasharray="3 3" />
                 <Line type="monotone" dataKey="payoff" stroke="#8884d8" strokeWidth={2} dot={false} />
               </LineChart>
@@ -310,4 +345,3 @@ function App() {
 }
 
 export default App;
-
