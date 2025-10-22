@@ -1,8 +1,8 @@
-// In your backend/server.js
+
 
 const express = require('express');
 const cors = require('cors');
-// --- NEW: Import the engine ---
+
 const { calculateStrategy } = require('./strategyengine');
 
 const app = express();
@@ -24,11 +24,9 @@ app.post('/calculate', (req, res) => {
         }
 
         const params = { ...req.body, spotPrices };
-
-        // --- NEW: Use the engine to perform the calculation ---
         const result = calculateStrategy(strategy, params);
         
-        // Format breakeven points for display
+        
         if (Array.isArray(result.breakeven)) {
             const formattedBreakeven = result.breakeven.map(be =>
                 (typeof be === 'number') ? be.toFixed(2) : be
