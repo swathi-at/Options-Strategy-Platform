@@ -1,11 +1,8 @@
-// backend/strategyengine.js
+
 
 const payoffFunctions = require('./payoffFunctions');
 
-/**
- * A map that connects the strategy identifier string from the frontend
- * to the corresponding calculation function in the backend.
- */
+
 const strategyMap = {
     // Single Leg
     'long-call': payoffFunctions.longCallPayoff,
