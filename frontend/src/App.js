@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import TradePanel from "./components/TradePanel"; // <-- NEW: Import the TradePanel component
 
-// --- Helper for Gemini API ---
+// --- (The rest of the initial setup code is the same) ---
 const API_KEY = "AIzaSyDoT2XZg9xo-Cm4VX-Gc8NgYj3ieGDpP24";
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}`;
-
-
 const strategyGroups = [
   {
     label: "Bullish Strategies",
@@ -49,12 +48,10 @@ const strategyGroups = [
     ]
   }
 ];
-
 const strategyConfigs = strategyGroups.flatMap(group => group.options).reduce((acc, option) => {
     acc[option.value] = { name: option.name, fields: option.fields };
     return acc;
 }, {});
-
 const formatLabel = (fieldName, strategy) => {
     if (strategy === 'calendar-spread') {
         if (fieldName === 'premium1') return 'Long-Term Premium';
@@ -72,6 +69,7 @@ const formatLabel = (fieldName, strategy) => {
     return labels[fieldName] || fieldName.replace(/(\d+)/, ' $1').replace(/^\w/, c => c.toUpperCase());
 };
 
+
 function App() {
   const [strategy, setStrategy] = useState('long-call');
   const [form, setForm] = useState({ lots: 1, lotSize: 50 });
@@ -81,6 +79,9 @@ function App() {
   const [analysis, setAnalysis] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [theme, setTheme] = useState('light');
+
+  // --- NEW: State to show/hide the trade panel ---
+  const [showTradePanel, setShowTradePanel] = useState(false);
 
   useEffect(() => {
     if (theme === 'dark') {
@@ -116,7 +117,6 @@ function App() {
     setTimeout(() => setStrategy(currentStrategy), 0);
   };
 
-  // --- FIXED: Restored full function body ---
   const handleSubmit = async () => {
     setError(null);
     setAnalysis("");
@@ -133,7 +133,6 @@ function App() {
     }
   };
   
-  // --- FIXED: Restored full function body ---
   const handleAnalysis = async () => {
       if (!data || !API_KEY || API_KEY === "YOUR_API_KEY_HERE") {
           setAnalysis("Please add your Gemini API Key in the App.js file to use this feature.");
@@ -149,14 +148,12 @@ function App() {
         1. **Strategy Overview:** Briefly explain what this strategy is and its goal.
         2. **Market Outlook:** Describe the ideal market condition (e.g., bullish, bearish, neutral, high/low volatility) for this trade to be profitable.
         3. **Risk Profile:** Explain the risk involved, referencing the calculated max profit and loss.
-
         Here are the details of the trade:
         - Strategy Name: ${strategyName}
         - Parameters: ${JSON.stringify(form)}
         - Maximum Profit: ${data.maxProfit}
         - Maximum Loss: ${data.maxLoss}
         - Breakeven Point(s): ${data.breakeven}
-
         Provide the analysis in clean, easy-to-read paragraphs. Do not repeat the input parameters in your analysis.
       `;
 
@@ -186,7 +183,6 @@ function App() {
       }
   };
     
-  // --- FIXED: Restored full function body ---
   const formatValue = (value) => {
       if (typeof value === 'number') {
           return value.toLocaleString('en-US', {
@@ -195,6 +191,14 @@ function App() {
           });
       }
       return value;
+  };
+
+  // --- NEW: Handler for the simulate trade button ---
+  const handleSimulateTrade = () => {
+    if (!data) return; // Don't do anything if there's no calculated strategy
+    console.log("Simulating trade for:", strategyConfigs[strategy].name);
+    setShowTradePanel(true);
+    // Later, this will send the trade to the backend API
   };
 
   return (
@@ -272,13 +276,22 @@ function App() {
           
           <div className="flex justify-between items-center mb-6 border-b dark:border-gray-600 pb-2">
             <h2 className="text-xl font-semibold text-gray-700 dark:text-gray-200">Calculation Results</h2>
-            <button 
-                onClick={handleAnalysis} 
-                disabled={isAnalyzing || isLoading}
-                className="bg-purple-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-purple-700 transition duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 font-semibold disabled:bg-purple-400 disabled:cursor-not-allowed"
-            >
-                {isAnalyzing ? 'Analyzing...' : '✨ Analyze Strategy'}
-            </button>
+            {/* --- NEW: Container for the two action buttons --- */}
+            <div className="flex space-x-2">
+                <button
+                  onClick={handleSimulateTrade}
+                  className="bg-blue-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-blue-700 transition duration-150 ease-in-out font-semibold"
+                >
+                  📈 Simulate Trade
+                </button>
+                <button 
+                    onClick={handleAnalysis} 
+                    disabled={isAnalyzing || isLoading}
+                    className="bg-purple-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-purple-700 transition duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 font-semibold disabled:bg-purple-400 disabled:cursor-not-allowed"
+                >
+                    {isAnalyzing ? 'Analyzing...' : '✨ Analyze Strategy'}
+                </button>
+            </div>
           </div>
           
           {(isAnalyzing || analysis) && (
@@ -342,6 +355,10 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* --- NEW: Conditionally render the TradePanel --- */}
+      {showTradePanel && <TradePanel />}
+
     </div>
   );
 }
