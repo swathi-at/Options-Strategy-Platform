@@ -1,4 +1,4 @@
-// backend/payoffFunctions.js
+
 
 // --- 1. CORE HELPER FUNCTIONS ---
 function callPayoff(spot, strike, premium) {
@@ -165,7 +165,7 @@ function bearPutSpreadPayoff(params) {
     const { strike1, premium1, strike2, premium2, lots, lotSize, spotPrices } = params;
     // For a bear put spread, you buy a put (premium1) and sell a put (premium2).
     // strike1 > strike2. This is a debit spread.
-    const netPremium = premium1 - premium2; // Debit paid
+    const netPremium = premium1 - premium2; 
     const curve = [];
     spotPrices.forEach(spot => {
         const longPutValue = Math.max(0, strike1 - spot);
@@ -175,7 +175,7 @@ function bearPutSpreadPayoff(params) {
     });
     const maxProfit = ((strike1 - strike2) - netPremium) * lots * lotSize;
     const maxLoss = -netPremium * lots * lotSize;
-    const risk = -maxLoss; // Risk is the debit paid
+    const risk = -maxLoss; 
     return {
         payoffCurve: curve,
         maxProfit,
@@ -209,7 +209,7 @@ function protectivePutPayoff(params) {
     };
 }
 
-function protectiveCallPayoff(params) { // This is more commonly known as a Covered Call
+function protectiveCallPayoff(params) { 
     const { stockPrice, strike, premium, lots, lotSize, spotPrices } = params;
     const curve = [];
     spotPrices.forEach(spot => {
@@ -266,7 +266,7 @@ function syntheticShortStockPayoff(params) {
     // Synthetic Short Stock = Short Call + Long Put (at the same strike)
     const { strike, premium, premium2, lots, lotSize, spotPrices } = params;
     // premium = call premium, premium2 = put premium
-    const netPremium = premium - premium2; // Net credit or debit
+    const netPremium = premium - premium2; 
     const curve = [];
 
     spotPrices.forEach(spot => {
@@ -459,36 +459,26 @@ function callButterflyPayoff(params) {
     };
 }
 
-// FIXED: This function now correctly calculates and uses the netPremium.
+
 function calendarSpreadPayoff(params) {
-    // A calendar spread's payoff at the expiration of the short-term option is complex.
-    // It depends on the remaining time value and implied volatility of the long-term option,
-    // which cannot be calculated without a pricing model (like Black-Scholes) and more inputs
-    // (e.g., volatility, interest rates, days to expiration for both options).
-    //
-    // THEREFORE, this function provides a *CONCEPTUAL and SIMPLIFIED* representation.
-    // It creates a parabolic curve to show the general shape of the P&L but is not financially precise.
+   
     const { strike, premium1, premium2, lots, lotSize, spotPrices } = params;
 
-    // A calendar spread is a debit spread.
-    // premium1 = long-term premium (bought), premium2 = short-term premium (sold)
     const netPremium = premium1 - premium2;
     const maxLoss = -netPremium * lots * lotSize;
     const risk = -maxLoss;
     const curve = [];
 
     spotPrices.forEach(spot => {
-        // This is an arbitrary formula to create the characteristic "tent" shape.
-        // It assumes max profit is roughly 2x the risk, peaking at the strike price.
-        const estimatedMaxProfit = risk * 2; // A more conservative estimate
+      
+        const estimatedMaxProfit = risk * 2; 
         const distanceFromStrike = Math.abs(spot - strike);
         
-        // Decay factor increases exponentially as the spot moves away from the strike.
-        // The denominator (strike * 0.15) controls the width of the profit tent. A smaller value makes it narrower.
+     
         const decayFactor = Math.pow(distanceFromStrike, 2) / Math.pow(strike * 0.15, 2);
         
         let pnl = estimatedMaxProfit - (decayFactor * estimatedMaxProfit);
-        // Ensure P&L doesn't go below the defined max loss.
+       
         pnl = Math.max(pnl, -risk);
 
         curve.push({ spot, payoff: pnl });

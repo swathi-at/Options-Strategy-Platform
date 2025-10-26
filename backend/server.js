@@ -1,9 +1,17 @@
+<<<<<<< HEAD
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const otpauth = require('otpauth');
 const crypto = require('crypto'); // <-- Import crypto library
+=======
+
+
+const express = require('express');
+const cors = require('cors');
+
+>>>>>>> 0eba933454e2309ecd6b5bbb0d7d157bea4c4479
 const { calculateStrategy } = require('./strategyengine');
 
 const app = express();
@@ -178,7 +186,12 @@ app.post('/calculate', (req, res) => {
 
         const params = { ...req.body, spotPrices };
         const result = calculateStrategy(strategy, params);
+<<<<<<< HEAD
 
+=======
+        
+        
+>>>>>>> 0eba933454e2309ecd6b5bbb0d7d157bea4c4479
         if (Array.isArray(result.breakeven)) {
             const formattedBreakeven = result.breakeven.map(be =>
                 (typeof be === 'number') ? be.toFixed(2) : be
