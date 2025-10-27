@@ -16,6 +16,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "fyers-api-v3": "^1.4.2",
     "otpauth": "^9.4.1"
   },
   "devDependencies": {
