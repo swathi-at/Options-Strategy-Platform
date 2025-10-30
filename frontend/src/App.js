@@ -6,6 +6,9 @@ import TradePanel from "./components/TradePanel"; // <-- NEW: Import the TradePa
 // --- (The rest of the initial setup code is the same) ---
 const API_KEY = "AIzaSyDoT2XZg9xo-Cm4VX-Gc8NgYj3ieGDpP24";
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}`;
+
+// --- [CHANGED BLOCK 1/2] ---
+// Updated to include 4 premium fields for Condors/Butterflies
 const strategyGroups = [
   {
     label: "Bullish Strategies",
@@ -30,9 +33,28 @@ const strategyGroups = [
       { value: 'short-straddle', name: 'Short Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
       { value: 'long-strangle', name: 'Long Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
       { value: 'short-strangle', name: 'Short Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
-      { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'strike2', 'strike3', 'strike4', 'netPremium', 'lots', 'lotSize'] },
-      { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
-      { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'strike2', 'strike3', 'netPremium', 'lots', 'lotSize'] },
+      
+      // --- HERE ARE THE CHANGES ---
+      { 
+        value: 'iron-condor', 
+        name: 'Iron Condor', 
+        // Changed from 'netPremium' to 4x premiums
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize'] 
+      },
+      { 
+        value: 'iron-butterfly', 
+        name: 'Iron Butterfly', 
+        // Changed from 'netPremium' to 3x premiums
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] 
+      },
+      { 
+        value: 'call-butterfly', 
+        name: 'Call Butterfly', 
+        // Changed from 'netPremium' to 3x premiums
+        fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] 
+      },
+      // --- END OF CHANGES ---
+
       { value: 'calendar-spread', name: 'Calendar Spread', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
     ]
   },
@@ -48,6 +70,8 @@ const strategyGroups = [
     ]
   }
 ];
+// --- [END CHANGED BLOCK 1/2] ---
+
 const strategyConfigs = strategyGroups.flatMap(group => group.options).reduce((acc, option) => {
     acc[option.value] = { name: option.name, fields: option.fields };
     return acc;
@@ -65,9 +89,158 @@ const formatLabel = (fieldName, strategy) => {
         if (fieldName === 'premium') return 'Call Premium';
         if (fieldName === 'premium2') return 'Put Premium';
     }
-    const labels = { lotSize: 'Lot Size', stockPrice: 'Stock Price', premium: 'Premium', premium1: 'Premium 1', premium2: 'Premium 2', strike: 'Strike', strike1: 'Strike 1', strike2: 'Strike 2', strike3: 'Strike 3', strike4: 'Strike 4', netPremium: 'Net Premium', };
+    // Added labels for new premium fields
+    const labels = { 
+      lotSize: 'Lot Size', stockPrice: 'Stock Price', premium: 'Premium', 
+      premium1: 'Premium 1', premium2: 'Premium 2', premium3: 'Premium 3', premium4: 'Premium 4',
+      strike: 'Strike', strike1: 'Strike 1', strike2: 'Strike 2', strike3: 'Strike 3', strike4: 'Strike 4', 
+      netPremium: 'Net Premium', 
+    };
     return labels[fieldName] || fieldName.replace(/(\d+)/, ' $1').replace(/^\w/, c => c.toUpperCase());
 };
+
+// --- [CHANGED BLOCK 2/2] ---
+// This function converts your flat 'form' state into the 
+// 'legs' array and payload that the backend /api/paper-trade endpoint expects.
+const translateFormToTrade = (strategy, form) => {
+    // We'll get lots from the form, but default to 1 if not present
+    const lots = form.lots || 1;
+    let tradeLegs = [];
+    
+    // We'll hard-code NIFTY for now. 
+    // TODO: Add a dropdown in the UI to select NIFTY/BANKNIFTY
+    const symbol = "NIFTY"; 
+    let strategyType = strategyConfigs[strategy].name;
+
+    // We must manually define the legs for each strategy
+    try {
+        switch (strategy) {
+            // --- 1-Leg Bullish/Bearish ---
+            case 'long-call':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+            case 'long-put':
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots });
+                break;
+            case 'short-call':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
+                break;
+            case 'short-put':
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots });
+                break;
+
+            // --- 2-Leg Spreads ---
+            case 'bull-call-spread':
+                tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots });
+                break;
+            case 'bear-call-spread':
+                tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+            case 'bull-put-spread':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'BUY', qty: lots });
+                break;
+            case 'bear-put-spread':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
+                break;
+
+            // --- Neutral (Volatilty) Strategies ---
+            case 'long-straddle':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots });
+                break;
+            case 'short-straddle':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots });
+                break;
+            case 'long-strangle': // Assumes strike1=Put, strike2=Call
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+            case 'short-strangle': // Assumes strike1=Put, strike2=Call
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots });
+                break;
+
+            // --- NEW: 4-Leg Strategies ---
+            case 'iron-condor': // 4 strikes, 4 legs
+                // 1. BUY OTM Put (strike1)
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                // 2. SELL OTM Put (strike2)
+                tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
+                // 3. SELL OTM Call (strike3)
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'SELL', qty: lots });
+                // 4. BUY OTM Call (strike4)
+                tradeLegs.push({ strike: form.strike4, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+
+            case 'iron-butterfly': // 3 strikes, 4 legs
+                // 1. BUY OTM Put (strike1)
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                // 2. SELL ATM Put (strike2)
+                tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
+                // 3. SELL ATM Call (strike2)
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots });
+                // 4. BUY OTM Call (strike3)
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+            
+            case 'call-butterfly': // 3 strikes, 4 legs (all calls)
+                // 1. BUY ITM Call (strike1)
+                tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
+                // 2. SELL 2x ATM Call (strike2)
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: (lots * 2) });
+                // 3. BUY OTM Call (strike3)
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots });
+                break;
+            // --- END NEW 4-Leg ---
+
+            // --- Other (Synthetic/Hedge) Strategies ---
+            case 'protective-put': // Long Stock + Long Put. Paper trading the option leg.
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots });
+                break;
+            case 'protective-call': // (Covered Call) Long Stock + Short Call. Paper trading the option leg.
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
+                break;
+            case 'synthetic-long-stock': // Long Call + Short Put
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots });
+                break;
+            case 'synthetic-short-stock': // Short Call + Long Put
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots });
+                break;
+
+            // --- BLOCKED STRATEGIES ---
+            case 'calendar-spread':
+                throw new Error(`Strategy Error: The paper trader can't handle different expiry dates yet. This strategy is not supported for paper trading.`);
+
+            default:
+                // If the strategy isn't listed, we can't trade it.
+                throw new Error(`Paper trading logic for "${strategyType}" is not implemented yet.`);
+        }
+    } catch (error) {
+        console.error("Trade Translation Error:", error);
+        alert(error.message); 
+        return null;
+    }
+
+    if (tradeLegs.length === 0) return null;
+
+    // This is the final JSON payload for the backend
+    return {
+        symbol: symbol,
+        strategyType: strategyType,
+        legs: tradeLegs,
+        // TODO: Add inputs for T/SL in the UI and get them from the form
+        targetPercent: 20, 
+        slPercent: -10     
+    };
+};
+// --- [END CHANGED BLOCK 2/2] ---
 
 
 function App() {
@@ -123,7 +296,7 @@ function App() {
     setIsLoading(true);
     try {
       const payload = { strategy, ...form };
-      const res = await axios.post('https://options-strategy-api.onrender.com/calculate', payload);
+      const res = await axios.post('http://localhost:5000/calculate', payload);
       setData(res.data);
     } catch (err) {
       setData(null); 
@@ -193,12 +366,35 @@ function App() {
       return value;
   };
 
-  // --- NEW: Handler for the simulate trade button ---
-  const handleSimulateTrade = () => {
+  // This is the wired-up function
+  const handleSimulateTrade = async () => {
     if (!data) return; // Don't do anything if there's no calculated strategy
-    console.log("Simulating trade for:", strategyConfigs[strategy].name);
-    setShowTradePanel(true);
-    // Later, this will send the trade to the backend API
+
+    // 1. Translate the form into a backend-ready payload
+    const tradePayload = translateFormToTrade(strategy, form);
+
+    // 2. Check if the translation was successful
+    if (!tradePayload) {
+        // The translator function will have already alerted the user
+        console.error("Trade payload is null, aborting.");
+        return;
+    }
+
+    try {
+        // 3. Send the payload to the backend
+        // Make sure your backend server URL is correct!
+        const res = await axios.post('http://localhost:5000/api/paper-trade', tradePayload);
+        
+        console.log("Paper trade submitted successfully:", res.data);
+        
+        // 4. Show the trade panel
+        setShowTradePanel(true);
+        
+    } catch (err) {
+        console.error("Failed to submit paper trade:", err);
+        // Display the error from the backend to the user
+        setError(err.response ? err.response.data.error : "Error submitting paper trade.");
+    }
   };
 
   return (
@@ -266,8 +462,8 @@ function App() {
 
       {error && (
         <div className="mt-8 p-4 bg-red-100 text-red-700 border border-red-400 rounded-lg shadow-lg text-center">
-            <p className="font-bold">Calculation Error</p>
-            <p>{error}</p>
+          <p className="font-bold">Calculation Error</p>
+          <p>{error}</p>
         </div>
       )}
 
