@@ -217,27 +217,15 @@ app.get('/api/historical-data', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch historical data...', details: errorDetails });
     }
 });
-// --- Fyers Live Data Endpoint (Spot + Option Chain) [USING LIBRARY FOR OPTIONS] ---
+// --- Fyers Live Data Endpoint (Spot + Option Chain) [CORRECTED CACHING] ---
 app.get('/api/live-data/:symbol', async (req, res) => {
     const { symbol } = req.params;
     const currentTime = Date.now();
 
-    // --- 1. Check Cache First ---
-    if (liveDataCache[symbol] && (currentTime - liveDataCache[symbol].timestamp < CACHE_DURATION_MS)) {
-        console.log(`Cache HIT for symbol: ${symbol}`);
-        return res.json(liveDataCache[symbol].data); // Serve from cache
-    }
-    console.log(`Cache MISS for symbol: ${symbol}. Fetching live data...`);
-    // --- End Cache Check ---
+    // --- 1. NORMALIZE SYMBOL FIRST ---
+    let underlyingSymbolFyers = ''; // Symbol for Fyers API
+    let userFriendlySymbol = '';    // Normalized key for cache & response
 
-    if (!fyersAccessToken) {
-        return res.status(401).json({ error: 'Not authenticated with Fyers. Please login first via /api/fyers/login' });
-    }
-
-    let underlyingSymbolFyers = ''; // Symbol for API calls (e.g., NSE:NIFTY50-INDEX)
-    let userFriendlySymbol = '';  // Symbol for response (e.g., NIFTY)
-
-    // --- Determine Correct Symbols ---
     if (symbol.toUpperCase().includes('NIFTY50') || symbol.toUpperCase() === 'NIFTY') {
         underlyingSymbolFyers = 'NSE:NIFTY50-INDEX';
         userFriendlySymbol = 'NIFTY';
@@ -248,19 +236,36 @@ app.get('/api/live-data/:symbol', async (req, res) => {
         underlyingSymbolFyers = symbol.toUpperCase(); // e.g., NSE:RELIANCE-EQ
         userFriendlySymbol = symbol.split(':')[1].split('-')[0]; // e.g., RELIANCE
     } else {
+        // Fallback for unrecognized formats. This might fail at the API level if not correct.
+        // Or return an error immediately:
         return res.status(400).json({ error: `Symbol format ${symbol} not recognized. Use NIFTY, BANKNIFTY, or Fyers format (e.g., NSE:RELIANCE-EQ).` });
     }
     // --- End Symbol Logic ---
 
-    // --- Ensure Data URL is configured ---
-    const baseUrlDataV3 = String(FYERS_API_DATA_URL_V3 || '').trim(); // Should be ".../data"
+
+    // --- 2. Check Cache *USING NORMALIZED KEY* ---
+    if (liveDataCache[userFriendlySymbol] && (currentTime - liveDataCache[userFriendlySymbol].timestamp < CACHE_DURATION_MS)) {
+        console.log(`Cache HIT for symbol: ${userFriendlySymbol}`);
+        return res.json(liveDataCache[userFriendlySymbol].data); // Serve from cache
+    }
+    console.log(`Cache MISS for symbol: ${userFriendlySymbol}. Fetching live data...`);
+    // --- End Cache Check ---
+
+
+    // --- 3. Check Authentication ---
+    if (!fyersAccessToken) {
+        return res.status(401).json({ error: 'Not authenticated with Fyers. Please login first via /api/fyers/login' });
+    }
+
+    // --- 4. Check Fyers Data URL Config ---
+    const baseUrlDataV3 = String(FYERS_API_DATA_URL_V3 || '').trim();
     if (!baseUrlDataV3 || !baseUrlDataV3.startsWith('http')) {
         console.error("CRITICAL ERROR: FYERS_API_DATA_URL_V3 env variable is missing or invalid!");
-        return res.status(500).json({error: "Server configuration error."});
+        return res.status(500).json({ error: "Server configuration error." });
     }
 
     try {
-        // --- 2. Fetch Live Data (Spot Price using axios) ---
+        // --- 5. Fetch Live Data (Spot Price using axios) ---
         const quotesApiHeaders = {
             'Authorization': `${FYERS_APP_ID}:${fyersAccessToken}`, // Correct format for /quotes GET
             'Content-Type': 'application/json'
@@ -275,42 +280,37 @@ app.get('/api/live-data/:symbol', async (req, res) => {
 
         const spotPrice = quotesResponse.data?.d?.[0]?.v?.lp;
         if (spotPrice === undefined || spotPrice === null) {
-             throw new Error(`Could not extract spot price (LTP) from quotes response.`);
+            throw new Error(`Could not extract spot price (LTP) from quotes response. Raw: ${JSON.stringify(quotesResponse.data)}`);
         }
         console.log(`Received Spot Price: ${spotPrice}`);
 
-        // --- 3. Fetch Live Data (Option Chain using Fyers Library) ---
+        // --- 6. Fetch Live Data (Option Chain using Fyers Library) ---
         console.log(`Fetching option chain via library for: ${underlyingSymbolFyers}`);
         const optionChainPayload = {
-            symbol: underlyingSymbolFyers, // Library wants the full symbol
-            strikecount: 50,              // Use number 50
-            timestamp: ""                 // Empty string for nearest expiry
+            symbol: underlyingSymbolFyers,
+            strikecount: 50,
+            timestamp: "" // Empty string for nearest expiry
         };
         console.log("Payload for fyers.getOptionChain:", JSON.stringify(optionChainPayload, null, 2));
 
         // Ensure token is set in the library instance
         if (!fyers.access_token || fyers.access_token !== fyersAccessToken) {
             console.log("Re-setting access token in fyers library instance...");
-             if (!fyersAccessToken) {
-                 throw new Error("Cannot fetch options, Fyers access token is missing.");
-             }
+            if (!fyersAccessToken) {
+                throw new Error("Cannot fetch options, Fyers access token is missing.");
+            }
             fyers.setAccessToken(fyersAccessToken);
         }
 
-        // --- THE KEY: Use the library function ---
         const optionChainResponse = await fyers.getOptionChain(optionChainPayload);
-        // --- END LIBRARY CALL ---
+        // console.log("Full option chain response received from library."); // Optional: too verbose
 
-        console.log("Full option chain response received from library."); // Less verbose log
-
-        // Check library response structure
         if (!optionChainResponse || optionChainResponse.s !== 'ok' || !optionChainResponse.data || !optionChainResponse.data.optionsChain) {
-             // Log the actual response structure if it failed
-             console.error("Invalid structure received from fyers.getOptionChain:", JSON.stringify(optionChainResponse, null, 2));
-             throw new Error(`Failed to fetch valid option chain via library. Status: ${optionChainResponse?.s}, Message: ${optionChainResponse?.message}`);
+            console.error("Invalid structure received from fyers.getOptionChain:", JSON.stringify(optionChainResponse, null, 2));
+            throw new Error(`Failed to fetch valid option chain via library. Status: ${optionChainResponse?.s}, Message: ${optionChainResponse?.message}`);
         }
 
-        // --- 4. Parse and Format Data (Including OI and Volume) ---
+        // --- 7. Parse and Format Data (Including OI and Volume) ---
         const fyersOptionsData = optionChainResponse.data.optionsChain;
         const expiryDateStr = optionChainResponse.data.expiryData?.[0]?.date; // e.g., "04-11-2025"
         let expiryDateForOutput = "YYYY-MM-DD";
@@ -326,7 +326,6 @@ app.get('/api/live-data/:symbol', async (req, res) => {
             if (option.strike_price === -1) continue; // Skip dummy spot price entry
             const strike = option.strike_price;
 
-            // Initialize with all fields if the strike is new
             if (!strikeMap.has(strike)) {
                 strikeMap.set(strike, {
                     strike: strike,
@@ -336,7 +335,6 @@ app.get('/api/live-data/:symbol', async (req, res) => {
             }
             const entry = strikeMap.get(strike);
 
-            // Populate Call or Put data including OI and Volume
             if (option.option_type === "CE") {
                 entry.CE_Ltp = option.ltp;
                 entry.CE_Oi = option.oi;
@@ -356,12 +354,12 @@ app.get('/api/live-data/:symbol', async (req, res) => {
             expiry: expiryDateForOutput,
         };
 
-        // --- 5. Store in Cache BEFORE sending response ---
-        liveDataCache[symbol] = { // Use the original requested symbol as cache key
+        // --- 8. Store in Cache *USING NORMALIZED KEY* ---
+        liveDataCache[userFriendlySymbol] = {
             timestamp: currentTime,
             data: responseData
         };
-        console.log(`Cached fresh data (with OI/Vol) for symbol: ${symbol}`);
+        console.log(`Cached fresh data (with OI/Vol) for symbol: ${userFriendlySymbol}`);
         // --- End Cache Store ---
 
         res.json(responseData); // Send the fresh data
@@ -369,32 +367,26 @@ app.get('/api/live-data/:symbol', async (req, res) => {
     } catch (error) {
         // --- Standard Error Handling ---
         const errorMessage = error?.message || "Unknown error";
-        // Check if error came from axios or the library
-        const errorDetails = error?.response?.data // Axios error structure
-                           || error?.data          // Library success=false structure?
-                           || (error?.s ? error : {}); // Library error structure?
-        console.error(`Error fetching live data for ${symbol}:`, errorMessage);
+        const errorDetails = error?.response?.data || error?.data || (error?.s ? error : {});
+        console.error(`Error fetching live data for ${userFriendlySymbol}:`, errorMessage);
         console.error("Details:", JSON.stringify(errorDetails, null, 2));
         if (error.stack) { console.error("Stack Trace:", error.stack); }
 
-        const statusCode = error.response?.status; // From axios
-        const errorCode = errorDetails?.code; // From Fyers (either axios or library)
+        const statusCode = error.response?.status;
+        const errorCode = errorDetails?.code;
 
-        // Handle common auth errors
         if (statusCode === 401 || statusCode === 429 || errorCode === -117 || errorCode === -435 || errorCode === -15 || errorMessage.includes('token')) {
             fyersAccessToken = null;
             fyers.setAccessToken(null);
-            delete liveDataCache[symbol]; // Clear potentially stale cache on auth error
+            delete liveDataCache[userFriendlySymbol]; // Clear cache on auth error
             return res.status(401).json({ error: 'Fyers token expired or invalid. Please login again.', details: errorDetails });
         }
 
-        // Handle bad request errors (like invalid symbol format to library)
         if (statusCode === 400 || errorCode === -50 || errorCode === -300) {
-             delete liveDataCache[symbol]; // Clear cache if the input was bad
-             return res.status(400).json({ error: 'Failed to fetch live data (Bad Request - check symbol format?).', details: errorDetails });
+            delete liveDataCache[userFriendlySymbol]; // Clear cache if the input was bad
+            return res.status(400).json({ error: 'Failed to fetch live data (Bad Request - check symbol format?).', details: errorDetails });
         }
 
-        // For other errors, don't clear cache, might be temporary
         res.status(500).json({ error: 'Failed to fetch live data due to an internal server error.', details: { message: errorMessage } });
     }
 });
