@@ -38,7 +38,6 @@ if (FYERS_APP_ID) {
 }
 
 let fyersAccessToken = null; // Store the final access token globally
-
 function getEncodedString(string) {
     // Ensure input is a string before encoding
     return Buffer.from(String(string)).toString('base64');
@@ -390,6 +389,232 @@ app.get('/api/live-data/:symbol', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch live data due to an internal server error.', details: { message: errorMessage } });
     }
 });
+
+// --- Paper Trading Module ---
+
+// 1. Our in-memory "database" for virtual trades 
+const paperTrades = []; 
+// We already imported 'crypto', so we can use it for unique IDs
+
+/**
+ * HELPER FUNCTION: findCurrentPrice
+ * A simple function to get the current LTP of a specific strike
+ * from our live data cache. This is the core of the P&L sim[cite: 92].
+ */
+function findCurrentPrice(symbol, strike, optionType) {
+    // --- TEMPORARY DEBUGGING LINE ---
+    // Return a random price between 100 and 101
+    return 100 + Math.random(); 
+
+    // --- The rest of your function is now skipped ---
+    try {
+        const normalizedSymbol = symbol.toUpperCase();
+        // ... (rest of the function)
+        const cachedData = liveDataCache[normalizedSymbol];
+        
+        if (!cachedData || !cachedData.data) {
+            console.warn(`[Paper Sim] No cached data for ${normalizedSymbol} to find price.`);
+            return null;
+        }
+
+        const option = cachedData.data.options.find(o => o.strike === strike);
+        if (!option) {
+            console.warn(`[Paper Sim] Strike ${strike} not found in cache for ${normalizedSymbol}`);
+            return null;
+        }
+
+        const price = (optionType === 'CE') ? option.CE_Ltp : option.PE_Ltp;
+        if (price === null || price === undefined) {
+             console.warn(`[Paper Sim] Price for ${normalizedSymbol} ${strike} ${optionType} is null.`);
+             return null;
+        }
+        return price;
+
+    } catch (err) {
+        console.error("[Paper Sim] Error in findCurrentPrice:", err.message);
+        return null;
+    }
+}
+
+
+/**
+ * 2. ENDPOINT: POST /api/paper-trade 
+ * Creates a new virtual trade and adds it to our paperTrades array
+ */
+app.post('/api/paper-trade', (req, res) => {
+    try {
+        // Get trade details from frontend
+        const {
+            symbol, 
+            strategyType, 
+            legs, // Array: [{ strike: 19800, optionType: 'CE', action: 'BUY', qty: 1 }, ...]
+            targetPercent, // e.g., 20 (for +20%)
+            slPercent      // e.g., -10 (for -10%)
+        } = req.body;
+
+        if (!symbol || !legs || !Array.isArray(legs) || legs.length === 0) {
+            return res.status(400).json({ error: "Invalid trade request. Symbol and legs array are required." });
+        }
+
+        let totalEntryCost = 0;
+        const processedLegs = [];
+
+        // Verify prices and build trade legs
+        for (const leg of legs) {
+            const entryPrice = findCurrentPrice(symbol, leg.strike, leg.optionType);
+
+            if (entryPrice === null) {
+                // This is a critical failure. We can't place a trade without a live price.
+                throw new Error(`Could not find live entry price for ${symbol} ${leg.strike} ${leg.optionType}. Try again in a few seconds.`);
+            }
+
+            // Calculate cost: BUYing adds to cost (debit), SELLing subtracts (credit)
+            const legCost = entryPrice * (leg.action.toUpperCase() === 'BUY' ? 1 : -1);
+            totalEntryCost += (legCost * leg.qty); 
+
+            processedLegs.push({
+                ...leg,
+                entryPrice: entryPrice,
+                currentPrice: entryPrice, // Starts at entry price
+                pnl: 0 // Starts at 0
+            });
+        }
+        
+        // --- Calculate P&L Targets ---
+        // This is tricky. If totalEntryCost is negative (a credit), 
+        // the T/SL logic inverts.
+        let targetPnl, slPnl;
+        
+        if (totalEntryCost > 0) { // Net Debit (e.g., Long Call)
+            // Target is a positive P&L
+            targetPnl = totalEntryCost * (targetPercent / 100);
+            // SL is a negative P&L (losing some of the debit)
+            slPnl = totalEntryCost * (slPercent / 100); 
+        } else { // Net Credit (e.g., Short Put)
+            // Target is a positive P&L (keeping more of the credit)
+            targetPnl = Math.abs(totalEntryCost) * (targetPercent / 100); 
+            // SL is a negative P&L (losing more than the credit)
+            slPnl = Math.abs(totalEntryCost) * (Math.abs(slPercent) / 100) * -1;
+        }
+
+        // Create the final trade object
+        const newTrade = {
+            tradeId: crypto.randomUUID(),
+            symbol: symbol.toUpperCase(),
+            strategyType: strategyType,
+            status: "OPEN", // Per plan, will change to "CLOSED" [cite: 93]
+            entryTimestamp: new Date().toISOString(),
+            legs: processedLegs,
+            
+            // P&L and Targets
+            netEntryCost: totalEntryCost, // This is the net debit/credit
+            targetPnl: targetPnl, 
+            slPnl: slPnl, 
+            
+            // Exit fields
+            currentNetPnl: 0,
+            exitTimestamp: null,
+            exitReason: null
+        };
+
+        // Store the virtual trade in memory
+        paperTrades.push(newTrade);
+        console.log(`[Paper Sim] New Trade OPENED: ${newTrade.tradeId} (${newTrade.strategyType})`);
+
+        // Return trade summary to frontend [cite: 94]
+        res.status(201).json(newTrade); 
+
+    } catch (error) {
+        console.error("[Paper Sim] Failed to place trade:", error.message);
+        res.status(500).json({ error: "Failed to place paper trade.", details: error.message });
+    }
+});
+
+
+/**
+ * 3. ENDPOINT: GET /api/paper-trades
+ * A new endpoint to let the frontend see all our open and closed trades.
+ * This is needed for the "Trade panel UI + results view" [cite: 136]
+ */
+app.get('/api/paper-trades', (req, res) => {
+    try {
+        res.json({
+            openTrades: paperTrades.filter(t => t.status === 'OPEN'),
+            closedTrades: paperTrades.filter(t => t.status !== 'OPEN')
+        });
+    } catch (error) {
+         console.error("[Paper Sim] Failed to get trades:", error.message);
+         res.status(500).json({ error: "Failed to retrieve paper trades." });
+    }
+});
+
+
+/**
+ * 4. BACKGROUND SIMULATION LOOP [cite: 92]
+ * This loop checks all "OPEN" trades and updates their P&L,
+ * closing them if T/SL is hit[cite: 93].
+ */
+const PNL_SIMULATION_INTERVAL_MS = 5000; // Check P&L every 5 seconds
+
+setInterval(() => {
+    const openTrades = paperTrades.filter(t => t.status === 'OPEN');
+    if (openTrades.length === 0) return; // No trades to check
+
+    // console.log(`[Paper Sim] Simulating P&L for ${openTrades.length} open trades...`);
+
+    for (const trade of openTrades) {
+        try {
+            let currentNetPnl = 0;
+            let canUpdate = true;
+
+            // Update P&L for each leg
+            for (const leg of trade.legs) {
+                const currentPrice = findCurrentPrice(trade.symbol, leg.strike, leg.optionType);
+                
+                if (currentPrice === null) {
+                    // Can't get a price, probably cache expired and not refetched
+                    canUpdate = false; 
+                    break; // Stop processing this trade if data is missing
+                }
+                
+                leg.currentPrice = currentPrice;
+                
+                // P&L calculation: (Current Price - Entry Price) * Action
+                // Action is +1 for BUY, -1 for SELL
+                const actionMultiplier = (leg.action.toUpperCase() === 'BUY' ? 1 : -1);
+                leg.pnl = (leg.currentPrice - leg.entryPrice) * actionMultiplier * leg.qty;
+
+                currentNetPnl += leg.pnl;
+            }
+
+            if (canUpdate) {
+                // This is the simulated P&L change [cite: 92]
+                trade.currentNetPnl = currentNetPnl;
+                
+                // --- Check for Target/SL Hit --- [cite: 93]
+                let closeReason = null;
+                
+                if (trade.targetPnl && currentNetPnl >= trade.targetPnl) {
+                    closeReason = "TARGET_HIT";
+                } else if (trade.slPnl && currentNetPnl <= trade.slPnl) {
+                    closeReason = "SL_HIT";
+                }
+                
+                if (closeReason) {
+                    trade.status = "CLOSED"; // Mark as "CLOSED" [cite: 93]
+                    trade.exitTimestamp = new Date().toISOString();
+                    trade.exitReason = closeReason;
+                    console.log(`[Paper Sim] Trade CLOSED: ${trade.tradeId} (${closeReason}) P&L: ${trade.currentNetPnl.toFixed(2)}`);
+                }
+            }
+        } catch (err) {
+            console.error(`[Paper Sim] Error simulating PNL for trade ${trade.tradeId}:`, err.message);
+        }
+    }
+}, PNL_SIMULATION_INTERVAL_MS);
+
+console.log("Paper trading module initialized. P&L simulation loop running.");
+// --- End Paper Trading Module ---
 // --- Your Existing Options Calculation Route ---
 app.post('/calculate', (req, res) => {
     try {
