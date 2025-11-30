@@ -1,4 +1,4 @@
-# Options Strategy Payoff API
+tt# Options Strategy Payoff API
 
 This backend server provides a single endpoint to calculate the payoff curve, max profit/loss, and breakeven points for various options trading strategies.
 

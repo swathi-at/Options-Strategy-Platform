@@ -1,4 +1,6 @@
-// --- 1. IMPORTS & SETUP ---
+// ==================================================================
+// 1. IMPORTS & SETUP
+// ==================================================================
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -6,21 +8,20 @@ const axios = require('axios');
 const otpauth = require('otpauth');
 const crypto = require('crypto');
 const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
-const { calculateStrategy } = require('./strategyengine');
-const { SYMBOL_LOT_SIZES } = require('./constants');
-
-// --- [NEW] Import WebSocket Server Library ---
+const { calculateStrategy } = require('./strategyengine'); // Keep this
+const { SYMBOL_LOT_SIZES } = require('./constants'); // Keep this
 const { WebSocketServer } = require('ws');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- 2. GLOBAL CONFIGURATION & STATE ---
+// ==================================================================
+// 2. GLOBAL CONFIGURATION & STATE
+// ==================================================================
 const liveDataCache = {}; 
 const CACHE_DURATION_MS = 20 * 1000; 
 
-// --- Fyers API Configuration ---
 const FYERS_APP_ID = process.env.FYERS_CLIENT_ID;
 const FYERS_SECRET_KEY = process.env.FYERS_SECRET_KEY;
 const FYERS_TOTP_KEY = process.env.FYERS_TOTP_KEY;
@@ -30,24 +31,15 @@ const FYERS_REDIRECT_URI = process.env.FYERS_REDIRECT_URI || 'https://www.google
 const FYERS_API_BASE_URL_V2 = 'https://api-t2.fyers.in/vagator/v2';
 const FYERS_API_DATA_URL_V3 = 'https://api-t1.fyers.in/data';
 
-// --- Bot State ---
 let fyersAccessToken = null;
 let fyersAppId = null; 
 let isAlgoRunning = false;
 let livePositions = []; 
 let candleHistory = [];
 let currentCandle = null;
-let algoState = {
-    symbol: "NSE:IDEA-EQ", 
-    interval: 3,           
-    qty: 1,                
-    stopLossPoints: 0.25,  
-    targetPoints: 0.50,    
-    isInTrade: false,      
-};
+let algoState = { symbol: "NSE:IDEA-EQ", interval: 3, qty: 1, stopLossPoints: 0.25, targetPoints: 0.50, isInTrade: false };
 
 const fyersLoginInstance = new fyersModel();
-
 if (FYERS_APP_ID) {
     fyersLoginInstance.setAppId(FYERS_APP_ID);
     console.log("Fyers App ID set.");
@@ -60,741 +52,545 @@ function getEncodedString(string) {
 }
 
 // ==================================================================
-// 3. UI DASHBOARD WEBSOCKET (NEW)
+// 3. UI DASHBOARD WEBSOCKET
 // ==================================================================
-
-// Create a WebSocket server on port 8080
 const wss = new WebSocketServer({ port: 8080 });
-let uiClients = new Set(); // To store all connected UI clients
+let uiClients = new Set(); 
 
 wss.on('connection', (ws) => {
     console.log('✅ UI Dashboard Connected');
     uiClients.add(ws);
-    
-    // Send a welcome message
     ws.send(JSON.stringify({ type: 'STATUS', message: 'Connected to Bot Server.' }));
-
-    ws.on('close', () => {
-        console.log('UI Dashboard Disconnected');
-        uiClients.delete(ws);
-    });
+    ws.on('close', () => { uiClients.delete(ws); });
 });
 
-/**
- * Broadcasts a message to all connected UI clients.
- * This is our "dashboard feed".
- * @param {object} data - The data to send (will be stringified)
- */
 function broadcast(data) {
     const message = JSON.stringify(data);
-    uiClients.forEach(client => {
-        if (client.readyState === 1) { // 1 = OPEN
-            client.send(message);
-        }
-    });
+    uiClients.forEach(client => { if (client.readyState === 1) client.send(message); });
 }
 
 console.log('UI Dashboard WebSocket Server started on port 8080.');
 
 // ==================================================================
-// 4. AUTHENTICATION (Login Route)
+// 4. LOGIC: GREEKS CALCULATOR (Embedded)
+// ==================================================================
+function normalcdf(X) {
+    if (typeof X !== 'number' || isNaN(X)) return 0;
+    var T = 1 / (1 + 0.2316419 * Math.abs(X));
+    var D = 0.39894228 * Math.exp(-X * X / 2);
+    var Prob = D * T * (0.31938153 + T * (-0.356563782 + T * (1.781477937 + T * (-1.821255978 + T * 1.330274429))));
+    if (X > 0) Prob = 1 - Prob;
+    return Prob;
+}
+
+function pdf(x) {
+    if (typeof x !== 'number' || isNaN(x)) return 0;
+    return Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI);
+}
+
+function calculateGreeks(s, k, t, v, r, type) {
+    s = parseFloat(s); k = parseFloat(k); t = parseFloat(t); v = parseFloat(v);
+    if (!s || !k) return { delta: 0, theta: 0, gamma: 0, vega: 0, iv: 0 };
+    if (t <= 0.002) t = 0.002; 
+    if (v <= 0) v = 0.15;
+
+    try {
+        const d1 = (Math.log(s / k) + (r + (v * v) / 2) * t) / (v * Math.sqrt(t));
+        const d2 = d1 - v * Math.sqrt(t);
+        let delta, theta;
+        const gamma = pdf(d1) / (s * v * Math.sqrt(t));
+        const vega = (s * pdf(d1) * Math.sqrt(t)) / 100;
+
+        if (type === 'CE') {
+            delta = normalcdf(d1);
+            theta = (- (s * pdf(d1) * v) / (2 * Math.sqrt(t)) - r * k * Math.exp(-r * t) * normalcdf(d2)) / 365;
+        } else {
+            delta = normalcdf(d1) - 1;
+            theta = (- (s * pdf(d1) * v) / (2 * Math.sqrt(t)) + r * k * Math.exp(-r * t) * normalcdf(-d2)) / 365;
+        }
+        return { 
+            delta: isNaN(delta) ? 0 : delta, theta: isNaN(theta) ? 0 : theta, 
+            gamma: isNaN(gamma) ? 0 : gamma, vega: isNaN(vega) ? 0 : vega, iv: v * 100 
+        };
+    } catch (e) { return { delta: 0, theta: 0, gamma: 0, vega: 0, iv: 0 }; }
+}
+
+function estimateGreeks(spot, strike, daysToExpiry, premium, type, vix) {
+    const days = (daysToExpiry && daysToExpiry > 0.5) ? daysToExpiry : 1; 
+    const t = days / 365; const r = 0.10; const iv = (vix || 15) / 100;
+    return calculateGreeks(spot, strike, t, iv, r, type);
+}
+
+// ==================================================================
+// 5. LOGIC: STRATEGY DEPLOYER (Embedded)
+// ==================================================================
+function detectATMStrike(strikes, spot) {
+    return strikes.reduce((prev, curr) => Math.abs(curr - spot) < Math.abs(prev - spot) ? curr : prev);
+}
+
+function chooseStrikeByDelta(chain, side, targetDelta, atmIndex) {
+    const start = Math.max(0, atmIndex - 6);
+    const end = Math.min(chain.length - 1, atmIndex + 6);
+    let best = null; let bestDiff = Infinity;
+
+    for (let i = start; i <= end; i++) {
+        const s = chain[i];
+        const g = (side === 'CE') ? s.CE_Greeks : s.PE_Greeks;
+        if (!g || typeof g.delta === 'undefined') continue;
+        const diff = Math.abs(Math.abs(g.delta) - Math.abs(targetDelta));
+        if (diff < bestDiff) {
+            bestDiff = diff; 
+            best = { strike: s.strike, greeks: g, price: (side === 'CE' ? s.CE_Ltp : s.PE_Ltp) };
+        }
+    }
+    return best; 
+}
+
+function buildCandidate(chain, atmIndex, stratName) {
+    const candidate = { name: stratName, legs: [], meta: {} };
+    
+    // --- 1. BULL CALL SPREAD ---
+    if (stratName === 'Bull Call Spread') {
+        const buy = chooseStrikeByDelta(chain, 'CE', 0.5, atmIndex); // Buy ATM
+        const sell = chooseStrikeByDelta(chain, 'CE', 0.25, atmIndex); // Sell OTM
+        if (!buy || !sell) return null;
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buy.strike, price: buy.price, greeks: buy.greeks });
+        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sell.strike, price: sell.price, greeks: sell.greeks });
+        candidate.meta.description = `Buy ${buy.strike} CE, Sell ${sell.strike} CE`;
+        return candidate;
+    }
+
+    // --- 2. BEAR PUT SPREAD (Added) ---
+    if (stratName === 'Bear Put Spread') {
+        const buy = chooseStrikeByDelta(chain, 'PE', 0.5, atmIndex); // Buy ATM Put (Delta -0.5)
+        const sell = chooseStrikeByDelta(chain, 'PE', 0.25, atmIndex); // Sell OTM Put (Delta -0.25)
+        if (!buy || !sell) return null;
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buy.strike, price: buy.price, greeks: buy.greeks });
+        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sell.strike, price: sell.price, greeks: sell.greeks });
+        candidate.meta.description = `Buy ${buy.strike} PE, Sell ${sell.strike} PE`;
+        return candidate;
+    }
+
+    // --- 3. IRON CONDOR (Added) ---
+    if (stratName === 'Iron Condor') {
+        // Sell wings (Delta ~0.16)
+        const sellCall = chooseStrikeByDelta(chain, 'CE', 0.16, atmIndex);
+        const sellPut = chooseStrikeByDelta(chain, 'PE', 0.16, atmIndex);
+        
+        if (!sellCall || !sellPut) return null;
+
+        // Buy protection (2 strikes further out)
+        // Note: In a real app, ensure indices don't go out of bounds
+        const buyCallIdx = Math.min(chain.length - 1, (chain.findIndex(x => x.strike === sellCall.strike) + 2));
+        const buyPutIdx = Math.max(0, (chain.findIndex(x => x.strike === sellPut.strike) - 2));
+        
+        const buyCall = chain[buyCallIdx];
+        const buyPut = chain[buyPutIdx];
+
+        if (!buyCall || !buyPut) return null;
+
+        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sellCall.strike, price: sellCall.price, greeks: sellCall.greeks });
+        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sellPut.strike, price: sellPut.price, greeks: sellPut.greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buyCall.strike, price: buyCall.CE_Ltp, greeks: buyCall.CE_Greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buyPut.strike, price: buyPut.PE_Ltp, greeks: buyPut.PE_Greeks });
+        
+        candidate.meta.description = `Iron Condor: Short ${sellCall.strike} CE / ${sellPut.strike} PE`;
+        return candidate;
+    }
+
+    // --- 4. LONG STRADDLE (Added for High VIX) ---
+    if (stratName === 'Long Straddle') {
+        const atm = chain[atmIndex];
+        if (!atm) return null;
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: atm.strike, price: atm.CE_Ltp, greeks: atm.CE_Greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: atm.strike, price: atm.PE_Ltp, greeks: atm.PE_Greeks });
+        candidate.meta.description = `Long Straddle @ ${atm.strike}`;
+        return candidate;
+    }
+    if (stratName === 'Calendar Spread') {
+        const atm = chain[atmIndex];
+        if (!atm) return null;
+
+        // NOTE: Real Calendar Spreads require fetching a second expiry chain.
+        // We SIMULATE the "Far Month" leg here by adding estimated Time Value (15%)
+        // so the strategy can be generated and tested immediately.
+        const nearPrice = atm.CE_Ltp;
+        const farPriceEst = nearPrice * 1.15; 
+
+        // Leg 1: Sell Near Month ATM Call
+        candidate.legs.push({ 
+            role: 'SELL', 
+            optionType: 'CE', 
+            strike: atm.strike, 
+            price: nearPrice, 
+            greeks: atm.CE_Greeks 
+        });
+
+        // Leg 2: Buy Far Month ATM Call (Simulated)
+        candidate.legs.push({ 
+            role: 'BUY', 
+            optionType: 'CE', 
+            strike: atm.strike, 
+            price: farPriceEst, 
+            // Far month options have lower Theta (decay slower), so we adjust the Greeks estimate
+            greeks: { ...atm.CE_Greeks, theta: (atm.CE_Greeks.theta || 0) * 0.6 } 
+        });
+
+        candidate.meta.description = `Calendar Spread: Short ${atm.strike} (Near) / Long ${atm.strike} (Far)`;
+        return candidate;
+    }
+
+    return null;
+}
+
+function decideStrategy(signal, spot, daysToExpiry, optionChain, vix, config = {}) {
+    let candidatesToTry = [];
+    
+    // Normalize logic based on PDF document
+    const VIX_HIGH = 18; 
+// --- DAY BUCKET LOGIC ---
+    if (daysToExpiry >= 4) {
+        if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
+        else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
+        else {
+            // NEUTRAL SIGNAL
+            if (vix > VIX_HIGH) candidatesToTry = ['Long Straddle']; // High Vol = Buy Volatility
+            else candidatesToTry = ['Calendar Spread', 'Iron Condor']; // Low Vol = Sell Near Term Decay
+        }
+    } else {
+        // Less than 4 days (Tighter spreads)
+        if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
+        else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
+        else candidatesToTry = ['Iron Condor']; // Calendar spreads risky very close to expiry
+    }
+
+    const strikesList = optionChain.map(c => c.strike);
+    const atm = detectATMStrike(strikesList, spot);
+    const atmIndex = strikesList.indexOf(atm);
+    
+    if (atmIndex === -1) return { decision: 'SKIP', reason: 'ATM Strike not found' };
+
+    const built = [];
+
+    for (const sname of candidatesToTry) {
+        const candidate = buildCandidate(optionChain, atmIndex, sname);
+        if (!candidate) continue;
+        
+        // Simple scoring based on Risk/Reward (Mocked for now)
+        let score = 50; 
+        if (sname.includes('Spread')) score += 20; // Prefer defined risk
+        if (sname.includes('Condor') && vix < 15) score += 30; // Good for low VIX
+        
+        candidate.score = score;
+        built.push(candidate);
+    }
+
+    // Sort by score descending
+    built.sort((a,b) => b.score - a.score);
+
+    const chosen = built.length ? built[0] : null;
+    if (chosen) return { decision: 'PLACE', strategy: chosen.name, legs: chosen.legs, meta: chosen.meta, score: chosen.score };
+    
+    return { decision: 'SKIP', reason: `No valid candidates found for ${signal.direction} in current market` };
+}
+
+// ==================================================================
+// 6. AUTH ROUTES
 // ==================================================================
 app.post('/api/fyers/login', async (req, res) => {
     try {
-        console.log("Starting Fyers automated login...");
-        
-        // Step 1: Send OTP Request
-        console.log("Step 1: Sending Login OTP request...");
+        console.log("Starting Login...");
         const otpUrl = `${FYERS_API_BASE_URL_V2}/send_login_otp_v2`;
-        const otpRes = await axios.post(otpUrl, { fy_id: getEncodedString(FYERS_FY_ID), app_id: "2" }, { headers: { 'Content-Type': 'application/json' }, timeout: 10000 });
+        const otpRes = await axios.post(otpUrl, { fy_id: getEncodedString(FYERS_FY_ID), app_id: "2" }, { headers: { 'Content-Type': 'application/json' } });
         const requestKeyOTP = otpRes.data?.request_key;
-        if (!requestKeyOTP) throw new Error(`Step 1 Failed: ${JSON.stringify(otpRes.data)}`);
-        console.log("Step 1 Successful.");
+        if (!requestKeyOTP) throw new Error("Step 1 Failed");
 
-        // Step 2: Verify TOTP
-        console.log("Step 2: Verifying TOTP...");
         let totp = new otpauth.TOTP({ issuer: "Fyers", label: "Fyers", algorithm: "SHA1", digits: 6, period: 30, secret: FYERS_TOTP_KEY });
         await new Promise(resolve => setTimeout(resolve, 1000));
-        const otpCode = totp.generate();
-        const verifyOtpRes = await axios.post(`${FYERS_API_BASE_URL_V2}/verify_otp`, { request_key: requestKeyOTP, otp: otpCode }, { timeout: 10000 });
+        const verifyOtpRes = await axios.post(`${FYERS_API_BASE_URL_V2}/verify_otp`, { request_key: requestKeyOTP, otp: totp.generate() });
         const requestKeyPin = verifyOtpRes.data?.request_key;
-        if (!requestKeyPin) throw new Error(`Step 2 Failed: ${JSON.stringify(verifyOtpRes.data)}`);
-        console.log("Step 2 Successful.");
+        if (!requestKeyPin) throw new Error("Step 2 Failed");
 
-        // Step 3: Verify PIN
-        console.log("Step 3: Verifying PIN...");
-        const session = axios.create({ timeout: 10000 });
+        const session = axios.create();
         const verifyPinRes = await session.post(`${FYERS_API_BASE_URL_V2}/verify_pin_v2`, { request_key: requestKeyPin, identity_type: "pin", identifier: getEncodedString(FYERS_PIN) });
         const intermediateAccessToken = verifyPinRes.data?.data?.access_token;
-        if (!intermediateAccessToken) throw new Error(`Step 3 Failed: ${JSON.stringify(verifyPinRes.data)}`);
-        console.log("Step 3 Successful.");
+        if (!intermediateAccessToken) throw new Error("Step 3 Failed");
 
-        // Step 4: Get Auth Code
-        console.log("Step 4: Getting Auth Code...");
         const appIdForToken = FYERS_APP_ID.endsWith('-100') ? FYERS_APP_ID.substring(0, FYERS_APP_ID.length - 4) : FYERS_APP_ID;
         session.defaults.headers.common['Authorization'] = `Bearer ${intermediateAccessToken}`;
-        const tokenPayload = { fyers_id: FYERS_FY_ID, app_id: appIdForToken, redirect_uri: FYERS_REDIRECT_URI, appType: "100", code_challenge: "", state: "None", scope: "", nonce: "", response_type: "code", create_cookie: true };
-        const tokenRes = await session.post(`https://api-t1.fyers.in/api/v3/token`, tokenPayload, {
-            validateStatus: function (status) { return (status >= 200 && status < 300) || status === 308; }
-        });
+        const tokenRes = await session.post(`https://api-t1.fyers.in/api/v3/token`, { fyers_id: FYERS_FY_ID, app_id: appIdForToken, redirect_uri: FYERS_REDIRECT_URI, appType: "100", code_challenge: "", state: "None", scope: "", nonce: "", response_type: "code", create_cookie: true }, { validateStatus: s => s < 400 });
         const authCodeUrl = tokenRes.data?.Url;
-        if (!authCodeUrl) throw new Error(`Step 4 Failed API: ${JSON.stringify(tokenRes.data)}`);
-        let authCode = null;
-        try {
-            const paramsString = authCodeUrl.split('?')[1]; if (!paramsString) throw new Error("No query string");
-            const paramsArray = paramsString.split('&');
-            for (const param of paramsArray) { const [key, value] = param.split('='); if (key === 'auth_code') { authCode = value; break; } }
-            if (!authCode) throw new Error("auth_code not found");
-        } catch (parseError) { throw new Error("Step 4 Failed Parsing: " + parseError.message); }
-        console.log("Step 4 Successful.");
+        if (!authCodeUrl) throw new Error("Step 4 Failed");
+        const authCode = authCodeUrl.split('auth_code=')[1]?.split('&')[0];
 
-        // Step 5: Get Final Access Token
-        console.log("Step 5: Exchanging Auth Code for Final Access Token...");
         const hashCreator = crypto.createHash('sha256');
         hashCreator.update(`${FYERS_APP_ID}:${FYERS_SECRET_KEY}`);
-        const appIdHashValue = hashCreator.digest('hex');
-        const finalTokenRes = await axios.post(`https://api-t1.fyers.in/api/v3/validate-authcode`,
-            { grant_type: 'authorization_code', code: authCode, appIdHash: appIdHashValue },
-            { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-        );
+        const finalTokenRes = await axios.post(`https://api-t1.fyers.in/api/v3/validate-authcode`, { grant_type: 'authorization_code', code: authCode, appIdHash: hashCreator.digest('hex') }, { headers: { 'Content-Type': 'application/json' } });
 
         if (finalTokenRes.data?.access_token) {
-            // Set global state
             fyersAccessToken = finalTokenRes.data.access_token;
-            fyersAppId = FYERS_APP_ID; 
-            
+            fyersAppId = FYERS_APP_ID;
             fyersLoginInstance.setAccessToken(fyersAccessToken);
-            console.log("✅ LOGIN SUCCESS! Access Token Received.");
-            
-            // --- START THE ALGO ---
-            startAlgoSystem(); // This starts the WebSocket Brain & Manager
-            
-            res.json({ success: true, message: "Login Successful. Algo Started.", accessToken: fyersAccessToken });
-        } else {
-            throw new Error(`Step 5 Failed: No access token`);
-        }
-
+            console.log("✅ LOGIN SUCCESS!");
+            startAlgoSystem();
+            res.json({ success: true, message: "Login Successful.", accessToken: fyersAccessToken });
+        } else { throw new Error("Step 5 Failed"); }
     } catch (error) {
         console.error("Login Error:", error.message);
         res.status(500).json({ success: false, error: "Login Failed", details: error.message });
     }
 });
 
-
 // ==================================================================
-// 5. ALGORITHMIC TRADING ENGINE (Brain & Manager) - MODIFIED
+// 7. ALGO & DATA HELPERS
 // ==================================================================
-
-/**
- * Main function to start both the Brain (WebSocket) and Manager (P&L Loop)
- */
 function startAlgoSystem() {
-    if (isAlgoRunning) {
-        console.log("Algo system is already running. Skipping new start.");
-        return;
-    }
-    if (!fyersAccessToken || !fyersAppId) {
-        console.error("Algo Bot cannot start. Missing token or app ID.");
-        return;
-    }
-
+    if (isAlgoRunning) return;
+    if (!fyersAccessToken) return;
     isAlgoRunning = true; 
     startWebSocketBrain();
     startAlgoManager();
 }
 
-// --- PART A: The Brain (WebSocket) ---
 function startWebSocketBrain() {
-    console.log(`💡 ALGO BRAIN: Initializing WebSocket for ${algoState.symbol}...`);
-    broadcast({ type: 'STATUS', message: `💡 ALGO BRAIN: Initializing WebSocket for ${algoState.symbol}...` });
-    
-    const socketAuth = `${fyersAppId}:${fyersAccessToken}`;
-    const skt = fyersDataSocket.getInstance(socketAuth, "."); 
-
+    console.log(`💡 ALGO BRAIN: Initializing WebSocket...`);
+    const skt = fyersDataSocket.getInstance(`${fyersAppId}:${fyersAccessToken}`, "."); 
     skt.on("connect", () => {
-        console.log("✅ Brain: WebSocket Connected. Subscribing...");
-        broadcast({ type: 'STATUS', message: `✅ Brain: WebSocket Connected. Subscribing...` });
+        console.log("✅ Brain Connected");
         skt.subscribe([algoState.symbol]);
         skt.mode(skt.FullMode); 
     });
-
     skt.on("message", (msg) => {
-        if (msg.symbol === algoState.symbol && msg.ltp && msg.exch_feed_time) {
-            processTick(msg.ltp, msg.exch_feed_time);
-        }
+        if (msg.symbol === algoState.symbol && msg.ltp) processTick(msg.ltp, msg.exch_feed_time);
     });
-
-    skt.on("error", (err) => {
-        console.log("Brain Socket Error:", err);
-        broadcast({ type: 'ERROR', message: `Brain Socket Error: ${err}` });
-    });
-    skt.on("close", () => {
-        console.log("Brain Socket Closed. Will attempt reconnect.");
-        broadcast({ type: 'STATUS', message: 'Brain Socket Closed. Reconnecting...' });
-    });
-
     skt.connect();
     skt.autoreconnect(); 
 }
 
-/**
- * Processes a live tick and builds a candle.
- */
 function processTick(ltp, time) {
     const date = new Date(time * 1000);
     const minutes = Math.floor(date.getMinutes() / algoState.interval) * algoState.interval;
     date.setMinutes(minutes, 0, 0); 
     const candleTime = Math.floor(date.getTime() / 1000);
-
-    if (!currentCandle) {
-        currentCandle = { time: candleTime, open: ltp, high: ltp, low: ltp, close: ltp };
-    } else if (candleTime === currentCandle.time) {
+    if (!currentCandle) currentCandle = { time: candleTime, open: ltp, high: ltp, low: ltp, close: ltp };
+    else if (candleTime === currentCandle.time) {
         currentCandle.high = Math.max(currentCandle.high, ltp);
         currentCandle.low = Math.min(currentCandle.low, ltp);
         currentCandle.close = ltp;
     } else {
-        const logMsg = `🕯️  Brain: ${algoState.interval}-min Candle Closed @ ${currentCandle.close}`;
-        console.log(logMsg);
-        broadcast({ type: 'CANDLE', message: logMsg, candle: currentCandle });
-        
+        broadcast({ type: 'CANDLE', message: `Candle Closed @ ${currentCandle.close}`, candle: currentCandle });
         candleHistory.push(currentCandle);
         if (candleHistory.length > 100) candleHistory.shift();
-        
         runSignalLogic(); 
         currentCandle = { time: candleTime, open: ltp, high: ltp, low: ltp, close: ltp };
     }
 }
 
-/**
- * The strategy logic (SMA Crossover) that runs when a candle closes.
- */
 async function runSignalLogic() {
-    if (algoState.isInTrade || candleHistory.length < 25) {
-        const msg = `Brain: Skipping signal check. ${algoState.isInTrade ? "Already in trade." : "Not enough candle data."}`;
-        broadcast({ type: 'STATUS', message: msg });
-        return; 
-    }
-
+    if (algoState.isInTrade || candleHistory.length < 25) return;
     const closes = candleHistory.map(c => c.close);
     const sma7 = closes.slice(-7).reduce((a, b) => a + b, 0) / 7;
     const sma25 = closes.slice(-25).reduce((a, b) => a + b, 0) / 25;
     const prevCloses = closes.slice(0, -1);
     const prevSma7 = prevCloses.slice(-7).reduce((a, b) => a + b, 0) / 7;
     const prevSma25 = prevCloses.slice(-26, -1).reduce((a, b) => a + b, 0) / 25;
-
-    const statusMsg = `Brain: SMA7: ${sma7.toFixed(2)} | SMA25: ${sma25.toFixed(2)}`;
-    console.log(statusMsg);
-    broadcast({ type: 'STATUS', message: statusMsg });
-
+    broadcast({ type: 'STATUS', message: `SMA7: ${sma7.toFixed(2)} | SMA25: ${sma25.toFixed(2)}` });
     if (sma7 > sma25 && prevSma7 < prevSma25) {
-        console.log("🚀 BUY SIGNAL TRIGGERED!");
-        broadcast({ type: 'SIGNAL', message: `🚀 BUY SIGNAL TRIGGERED! (SMA7: ${sma7.toFixed(2)}, SMA25: ${sma25.toFixed(2)})` });
-        
         algoState.isInTrade = true;
-        
-        try {
-            const order = await placeLiveOrder(algoState.symbol, algoState.qty, 1); // 1 = Buy
-            await monitorOrderFill(order.id); 
-        } catch (e) {
-            console.error("Trade Entry Failed:", e.message);
-            broadcast({ type: 'ERROR', message: `Trade Entry Failed: ${e.message}` });
-            algoState.isInTrade = false; 
-        }
+        try { await placeLiveOrder(algoState.symbol, algoState.qty, 1); } catch (e) { algoState.isInTrade = false; }
     }
 }
 
-/**
- * Waits for an order to be FILLED before adding it to the Manager.
- */
-async function monitorOrderFill(orderId) {
-    console.log(`Brain: Polling for fill status of order ${orderId}...`);
-    broadcast({ type: 'STATUS', message: `Brain: Polling for fill status of order ${orderId}...` });
-
-    const fyers = new fyersModel();
-    fyers.setAppId(fyersAppId);
-    fyers.setAccessToken(fyersAccessToken);
-
-    for (let i = 0; i < 10; i++) { 
-        await new Promise(r => setTimeout(r, 2000));
-        
-        const book = await fyers.get_orders();
-        const myOrder = book.orders?.find(o => o.id === orderId);
-        
-        if (myOrder) {
-            if (myOrder.status === 2) { // 2 = Filled
-                const trade = {
-                    symbol: algoState.symbol,
-                    qty: algoState.qty,
-                    buyPrice: myOrder.tradedPrice,
-                    stopLoss: myOrder.tradedPrice - algoState.stopLossPoints,
-                    target: myOrder.tradedPrice + algoState.targetPoints
-                };
-                livePositions.push(trade);
-                const msg = `✅ TRADE ACTIVE: Bought @ ${myOrder.tradedPrice}. SL: ${trade.stopLoss}, Tgt: ${trade.target}`;
-                console.log(msg);
-                broadcast({ type: 'TRADE_OPEN', message: msg, trade: trade });
-                return;
-            }
-            if (myOrder.status === 5) { // 5 = Rejected
-                broadcast({ type: 'ERROR', message: `Order ${orderId} was REJECTED.` });
-                throw new Error(`Order ${orderId} was REJECTED by broker.`);
-            }
-        }
-    }
-    console.log(`Brain: Order ${orderId} not filled in time.`);
-    broadcast({ type: 'ERROR', message: `Order ${orderId} not filled in time.` });
-    algoState.isInTrade = false;
-}
-
-// --- PART B: The Manager (P&L Loop) ---
 function startAlgoManager() {
-    console.log("💼 ALGO MANAGER: Started. Checking P&L every 3 seconds.");
     setInterval(async () => {
         if (!fyersAccessToken || livePositions.length === 0) return;
-
         try {
             const pos = livePositions[0]; 
-            
-            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, {
-                params: { symbols: pos.symbol },
-                headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` }
-            });
+            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: pos.symbol }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
             const ltp = quotesRes.data.d?.[0]?.v?.lp;
             if (!ltp) return; 
-
             const pnl = (ltp - pos.buyPrice) * pos.qty;
-            const pnlMsg = `Manager P&L: ${pnl.toFixed(2)} (LTP: ${ltp}, Target: ${pos.target}, SL: ${pos.stopLoss})`;
-            // console.log(pnlMsg); // Too noisy for console, but good for UI
-            broadcast({ type: 'PNL_UPDATE', message: pnlMsg, pnl: pnl, ltp: ltp, trade: pos });
-
+            broadcast({ type: 'PNL_UPDATE', pnl: pnl, ltp: ltp, trade: pos });
             if (ltp >= pos.target || ltp <= pos.stopLoss) {
-                const reason = ltp >= pos.target ? "TARGET HIT" : "STOP LOSS HIT";
-                console.log(`🚨 ${reason}! Closing Trade...`);
-                broadcast({ type: 'TRADE_CLOSE', message: `🚨 ${reason}! Closing Trade...` });
-                
-                await placeLiveOrder(pos.symbol, pos.qty, -1); // -1 = Sell
-                
-                livePositions = []; 
-                algoState.isInTrade = false; 
-                console.log("✅ Trade Closed. Bot is ready for new signals.");
-                broadcast({ type: 'STATUS', message: "✅ Trade Closed. Bot is ready for new signals." });
+                await placeLiveOrder(pos.symbol, pos.qty, -1);
+                livePositions = []; algoState.isInTrade = false; 
+                broadcast({ type: 'TRADE_CLOSE', message: "Trade Closed" });
             }
-        } catch (e) {
-            console.error("Manager Error:", e.message);
-            broadcast({ type: 'ERROR', message: `Manager Error: ${e.message}` });
-        }
-    }, 3000); // Check every 3 seconds
+        } catch (e) { }
+    }, 3000); 
 }
 
-// ==================================================================
-// 6. API HELPER FUNCTIONS
-// ==================================================================
-
-/**
- * Universal function to place a live order.
- */
 async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     const fyers = new fyersModel();
     fyers.setAppId(fyersAppId);
     fyers.setAccessToken(fyersAccessToken);
+    let payload = { symbol, qty, type: 2, side, productType: "INTRADAY", validity: "DAY" };
+    if (isAMO) { payload.type = 1; payload.limitPrice = 100; payload.productType = "CNC"; payload.offlineOrder = true; }
+    return await fyers.place_order(payload);
+}
 
-    let payload = {
-        symbol: symbol,
-        qty: qty,
-        type: 2, // 2 = Market Order
-        side: side, 
-        productType: "INTRADAY", // MIS
-        validity: "DAY",
-        offlineOrder: false
+async function fetchMarketDataWithGreeks(symbol) {
+    let inputSymbol = symbol.toUpperCase();
+    let underlyingSymbolFyers = '';
+    let userFriendlyKey = '';
+    if (inputSymbol === 'NIFTY') { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; }
+    else if (inputSymbol === 'BANKNIFTY') { underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX'; userFriendlyKey = 'BANKNIFTY'; }
+    else if (inputSymbol.includes(':')) { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol.split(':')[1].replace('-INDEX', ''); }
+    else { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; } 
+
+    // Fetch Spot
+    const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: underlyingSymbolFyers }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
+    const spotPrice = quotesRes.data?.d?.[0]?.v?.lp || 0;
+
+    // Fetch Chain
+    const fyers = new fyersModel();
+    fyers.setAppId(fyersAppId);
+    fyers.setAccessToken(fyersAccessToken);
+    const chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 60, timestamp: "" });
+    if (!chainRes.data?.optionsChain) throw new Error("Option chain fetch failed");
+
+    // Calc Days
+    let daysToExpiry = 7; 
+    try {
+        const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
+        if (expiryEpoch) {
+            const diffTime = (new Date(expiryEpoch * 1000).getTime()) - (new Date().getTime());
+            daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            if (daysToExpiry <= 0) daysToExpiry = 0.001; 
+        }
+    } catch (e) { }
+
+    // Calc Greeks
+    const mockVix = 14.5;
+    const strikeMap = new Map();
+    chainRes.data.optionsChain.forEach(opt => {
+        if (!strikeMap.has(opt.strike_price)) {
+            strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE_Ltp: 0, PE_Ltp: 0, CE_Greeks: {}, PE_Greeks: {} });
+        }
+        const item = strikeMap.get(opt.strike_price);
+        if (opt.option_type === 'CE') {
+            item.CE_Ltp = opt.ltp;
+            item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', mockVix);
+        } else if (opt.option_type === 'PE') {
+            item.PE_Ltp = opt.ltp;
+            item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', mockVix);
+        }
+    });
+
+    return {
+        symbol: userFriendlyKey,
+        fyersSymbol: underlyingSymbolFyers,
+        spot: spotPrice,
+        vix: mockVix,
+        daysToExpiry: daysToExpiry,
+        options: Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike)
     };
-
-    if (isAMO) {
-        console.log("Detected AMO request. Fetching LTP for limit price...");
-        const quotes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, {
-            params: { symbols: symbol },
-            headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` }
-        });
-        const ltp = quotes.data.d?.[0]?.v?.lp || 10; 
-        
-        payload.type = 1; // 1 = Limit Order
-        payload.limitPrice = side === 1 ? ltp + 0.5 : ltp - 0.5;
-        payload.productType = "CNC"; 
-        payload.offlineOrder = true; 
-    }
-
-    console.log(`Placing Order: ${side === 1 ? 'BUY' : 'SELL'} ${qty} ${symbol} (AMO: ${isAMO})`);
-    const res = await fyers.place_order(payload);
-    
-    if (res.s !== 'ok') {
-        throw new Error(`Order Failed: ${res.message}`);
-    }
-    
-    console.log("Fyers Order Response:", res);
-    return res; 
 }
 
 // ==================================================================
-// 7. API ROUTES FOR FRONTEND
+// 8. API ROUTES
 // ==================================================================
-
-/**
- * Route: /api/live-data/:symbol
- */
 app.get('/api/live-data/:symbol', async (req, res) => {
-    const { symbol } = req.params;
-    const currentTime = Date.now();
+    try {
+        const data = await fetchMarketDataWithGreeks(req.params.symbol);
+        liveDataCache[data.symbol] = { timestamp: Date.now(), data: data };
+        res.json(data);
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
-    // --- 1. DYNAMIC SYMBOL NORMALIZATION (FIXED) ---
-    let inputSymbol = symbol.toUpperCase();
-    let underlyingSymbolFyers = '';
-    let userFriendlyKey = ''; 
-
-    if (inputSymbol === 'NIFTY') {
-        underlyingSymbolFyers = 'NSE:NIFTY50-INDEX';
-        userFriendlyKey = 'NIFTY';
-    } else if (inputSymbol === 'BANKNIFTY') {
-        underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX';
-        userFriendlyKey = 'BANKNIFTY';
-    } else if (inputSymbol === 'FINNIFTY') {
-        underlyingSymbolFyers = 'NSE:FINNIFTY-INDEX';
-        userFriendlyKey = 'FINNIFTY';
-    } else if (inputSymbol === 'MIDCPNIFTY') {
-        underlyingSymbolFyers = 'NSE:MIDCPNIFTY-INDEX';
-        userFriendlyKey = 'MIDCPNIFTY';
-    } else if (inputSymbol.includes(':')) {
-        underlyingSymbolFyers = inputSymbol;
-        userFriendlyKey = inputSymbol.split(':')[1].replace('-INDEX', '');
-    } else {
-        return res.status(400).json({ 
-            error: `Unrecognized short symbol '${symbol}'. Use a full symbol like 'NSE:SYMBOL-INDEX'.` 
-        });
-    }
-    
-    console.log(`Live Data Request: Normalized ${symbol} -> ${underlyingSymbolFyers}`);
-    // --- End Dynamic Symbol Logic ---
-
-    // 2. Cache Check
-    if (liveDataCache[userFriendlyKey] && (currentTime - liveDataCache[userFriendlyKey].timestamp < CACHE_DURATION_MS)) {
-        return res.json(liveDataCache[userFriendlyKey].data);
-    }
+app.get('/api/live-data-with-greeks/:symbol', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
-
     try {
-        // 3. Fetch Spot Price
-        const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, {
-            params: { symbols: underlyingSymbolFyers },
-            headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` }
-        });
-
-        const fyersError = quotesRes.data?.d?.[0]?.v?.errmsg;
-        if (fyersError) {
-             throw new Error(fyersError);
-        }
-
-        const spotPrice = quotesRes.data?.d?.[0]?.v?.lp;
-        if (spotPrice === undefined || spotPrice === null) {
-            throw new Error(`Could not extract spot price for ${underlyingSymbolFyers}.`);
-        }
-
-        // 4. Fetch Option Chain (Only if it's a "Tradable" index)
-        let optionsData = [];
-        let expiryDateForOutput = "N/A";
-
-        if (Object.keys(SYMBOL_LOT_SIZES).includes(userFriendlyKey)) {
-            const fyers = new fyersModel();
-            fyers.setAppId(fyersAppId);
-            fyers.setAccessToken(fyersAccessToken);
-            const optionChainResponse = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 50, timestamp: "" });
-            
-            if (optionChainResponse.data?.optionsChain) {
-                const fyersOptionsData = optionChainResponse.data.optionsChain;
-                const expiryDateStr = optionChainResponse.data.expiryData?.[0]?.date || "YYYY-MM-DD";
-                try { const parts = expiryDateStr.split('-'); expiryDateForOutput = `${parts[2]}-${parts[1]}-${parts[0]}`; } catch (e) { }
-
-                const strikeMap = new Map();
-                fyersOptionsData.forEach(option => {
-                    if (option.strike_price === -1) return;
-                    if (!strikeMap.has(option.strike_price)) {
-                        strikeMap.set(option.strike_price, { strike: option.strike_price, CE_Ltp: null, PE_Ltp: null, CE_Oi: null, PE_Oi: null });
-                    }
-                    const entry = strikeMap.get(option.strike_price);
-                    if (option.option_type === "CE") { entry.CE_Ltp = option.ltp; entry.CE_Oi = option.oi; }
-                    else if (option.option_type === "PE") { entry.PE_Ltp = option.ltp; entry.PE_Oi = option.oi; }
-                });
-                optionsData = Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike);
-            }
-        }
-
-        // 5. Format & Cache Data
-        const responseData = {
-            symbol: userFriendlyKey, // The "key" e.g., NIFTY, NIFTYAUTO
-            fyersSymbol: underlyingSymbolFyers,
-            spot: spotPrice,
-            options: optionsData,
-            expiry: expiryDateForOutput,
-        };
-        liveDataCache[userFriendlyKey] = { timestamp: currentTime, data: responseData };
-        res.json(responseData);
-
-    } catch (error) {
-        console.error(`Live Data Error for ${symbol}:`, error.message);
-        res.status(500).json({ error: "Failed to fetch live data", details: error.message, symbol: underlyingSymbolFyers });
-    }
+        const data = await fetchMarketDataWithGreeks(req.params.symbol);
+        liveDataCache[data.symbol] = { timestamp: Date.now(), data: data }; // Populate Cache
+        res.json(data);
+    } catch (error) { res.status(500).json({ error: "Failed to fetch data", details: error.message }); }
 });
 
-/**
- * Route: /api/historical-data
- */
-app.get('/api/historical-data', async (req, res) => {
-    const { symbol, resolution, from, to } = req.query; 
-
-    if (!symbol || !resolution || !from || !to) {
-        return res.status(400).json({ error: 'Missing required query parameters.' });
-    }
-    if (!fyersAccessToken) {
-        return res.status(401).json({ error: 'Not authenticated.' });
-    }
-
+app.post('/api/decide-and-build-order', async (req, res) => {
+    if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     try {
-        const fromDate = new Date(from);
-        const toDate = new Date(to);
-        const fromEpoch = Math.floor(fromDate.getTime() / 1000);
-        const toEpoch = Math.floor(toDate.getTime() / 1000);
-
-        const historyPayload = {
-            symbol: symbol,
-            resolution: resolution,
-            date_format: "0", 
-            range_from: String(fromEpoch),
-            range_to: String(toEpoch),
-            cont_flag: "1"
-        };
-        
-        const fyers = new fyersModel();
-        fyers.setAppId(fyersAppId);
-        fyers.setAccessToken(fyersAccessToken);
-        const historyResponse = await fyers.getHistory(historyPayload);
-
-        if (historyResponse.s !== 'ok' || !historyResponse.candles) {
-            throw new Error(`Failed to fetch historical data: ${historyResponse.message}`);
-        }
-        
-        const formattedCandles = historyResponse.candles.map(c => ({
-            timestamp: c[0], date: new Date(c[0] * 1000).toISOString(),
-            open: c[1], high: c[2], low: c[3], close: c[4], volume: c[5]
-        }));
-
-        res.json({
-            symbol: symbol,
-            resolution: resolution,
-            candles: formattedCandles
-        });
-
-    } catch (error) {
-        console.error("Historical Data Error:", error.message);
-        res.status(500).json({ error: 'Failed to fetch historical data', details: error.message });
-    }
+        const { signal, symbol } = req.body;
+        const marketData = await fetchMarketDataWithGreeks(symbol);
+        const decision = decideStrategy(signal, marketData.spot, marketData.daysToExpiry, marketData.options, marketData.vix);
+        res.json(decision);
+    } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
 });
 
-/**
- * Route: /calculate (Payoff)
- */
 app.post('/calculate', (req, res) => {
     try {
-        const { strategy, strike, strike1, strike2, strike3, stockPrice, symbol } = req.body;
-        const referenceStrike = strike || strike2 || strike1 || strike3 || stockPrice;
-        if (!referenceStrike) {
-            return res.status(400).json({ error: 'A valid strike or stock price is required.' });
-        }
+        const { strategy, strike, strike1, strike2, stockPrice, symbol } = req.body;
+        const s = Number(strike) || 0;
+        const s1 = Number(strike1) || 0;
+        const s2 = Number(strike2) || 0;
+        const sp = Number(stockPrice) || 0;
+        const referenceStrike = s || s1 || s2 || sp;
+        if (!referenceStrike) return res.status(400).json({ error: 'Valid strike required.' });
+
         const spotPrices = [];
-        for (let s = referenceStrike * 0.85; s <= referenceStrike * 1.15; s += 1) {
-            spotPrices.push(Math.round(s));
-        }
-        
+        for (let i = referenceStrike * 0.85; i <= referenceStrike * 1.15; i += referenceStrike*0.01) spotPrices.push(Math.round(i));
         const params = { ...req.body, spotPrices };
         
         if (!params.lotSize) {
-             const configKey = Object.keys(SYMBOL_LOT_SIZES).find(key => key === symbol?.toUpperCase());
-             params.lotSize = configKey ? SYMBOL_LOT_SIZES[configKey] : 1;
+             const key = Object.keys(SYMBOL_LOT_SIZES).find(k => k === symbol?.toUpperCase());
+             params.lotSize = key ? SYMBOL_LOT_SIZES[key] : 1;
         }
-
         const result = calculateStrategy(strategy, params);
-        
-        if (Array.isArray(result.breakeven)) {
-            const formattedBreakeven = result.breakeven.map(be =>
-                (typeof be === 'number') ? be.toFixed(2) : be
-            );
-            result.breakeven = `${formattedBreakeven[0]} & ${formattedBreakeven[1]}`;
-        } else if (typeof result.breakeven === 'number') {
-            result.breakeven = result.breakeven.toFixed(2);
-        }
-
+        if (Array.isArray(result.breakeven)) result.breakeven = result.breakeven.map(n => n.toFixed(2)).join(' & ');
+        else if (typeof result.breakeven === 'number') result.breakeven = result.breakeven.toFixed(2);
         res.json(result);
-    } catch (error) {
-        console.error("Error in /calculate route:", error);
-        res.status(400).json({ error: error.message });
-    }
+    } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
-/**
- * Route: /api/execute-signal (Manual Test)
- */
-app.post('/api/execute-signal', async (req, res) => {
-    const signal = req.body;
-    console.log("MANUAL SIGNAL RECEIVED:", JSON.stringify(signal, null, 2));
-
-    if (!fyersAccessToken) {
-        return res.status(401).json({ error: 'Not Authenticated.' });
-    }
-    
-    const TEST_SYMBOL = "NSE:IDEA-EQ";
-    const TEST_QTY = 1;
-    const side = signal.direction === "UP" ? 1 : -1;
-
-    try {
-        const orderResponse = await placeLiveOrder(
-            TEST_SYMBOL, 
-            TEST_QTY, 
-            side, 
-            true // true = isAMO (for weekend testing)
-        );
-        res.json({ success: true, message: "Manual AMO Test Order Placed.", details: orderResponse });
-    } catch (error) {
-        console.error("Manual Signal Error:", error.message);
-        res.status(500).json({ error: "Manual Trade Failed", details: error.message });
-    }
-});
-
-// ==================================================================
-// 8. PAPER TRADING MODULE
-// ==================================================================
+// PAPER TRADING
 const paperTrades = [];
-
-/**
- * Helper: Find current price from cache for paper trading
- */
 function findCurrentPrice(symbol, strike, optionType) {
     try {
-        const normalizedSymbol = symbol.toUpperCase();
-        const cachedData = liveDataCache[normalizedSymbol];
-        if (!cachedData || !cachedData.data) return null;
-        const option = cachedData.data.options.find(o => o.strike === strike);
-        if (!option) return null;
-        const price = (optionType === 'CE') ? option.CE_Ltp : option.PE_Ltp;
-        return (price !== null && price !== undefined) ? price : null;
-    } catch (err) {
-        return null;
-    }
+        let key = symbol.toUpperCase().includes(':') ? symbol.split(':')[1].replace('-INDEX', '') : symbol.toUpperCase();
+        if (key === 'NIFTY 50') key = 'NIFTY';
+        const cached = liveDataCache[key];
+        if (!cached || !cached.data) return null;
+        const opt = cached.data.options.find(o => o.strike === Number(strike));
+        return opt ? (optionType === 'CE' ? opt.CE_Ltp : opt.PE_Ltp) : null;
+    } catch (err) { return null; }
 }
 
-/**
- * Route: /api/paper-trade (POST)
- */
 app.post('/api/paper-trade', (req, res) => {
     try {
-        const { symbol, strategyType, legs, targetPercent, slPercent } = req.body;
-        if (!symbol || !legs || !Array.isArray(legs) || legs.length === 0) {
-            return res.status(400).json({ error: "Invalid trade request." });
-        }
-        let totalEntryCost = 0;
-        const processedLegs = [];
+        const { symbol, strategyType, legs } = req.body;
+        let totalCost = 0;
+        const procLegs = [];
         for (const leg of legs) {
-            const entryPrice = findCurrentPrice(symbol, leg.strike, leg.optionType);
-            if (entryPrice === null) {
-                throw new Error(`Could not find live price for ${symbol} ${leg.strike} ${leg.optionType}.`);
-            }
-            const legCost = entryPrice * (leg.action.toUpperCase() === 'BUY' ? 1 : -1);
-            totalEntryCost += (legCost * leg.qty); 
-            processedLegs.push({ ...leg, entryPrice, currentPrice: entryPrice, pnl: 0 });
+            const price = findCurrentPrice(symbol, leg.strike, leg.optionType);
+            const finalPrice = (price !== null) ? price : leg.price;
+            if (!finalPrice) throw new Error(`Price not found for ${leg.strike} ${leg.optionType}`);
+            procLegs.push({ ...leg, entryPrice: finalPrice, currentPrice: finalPrice, pnl: 0 });
+            totalCost += (finalPrice * (leg.action === 'BUY' ? 1 : -1) * leg.qty);
         }
-        let targetPnl, slPnl;
-        if (totalEntryCost > 0) { // Net Debit
-            targetPnl = totalEntryCost * (targetPercent / 100);
-            slPnl = totalEntryCost * (slPercent / 100); 
-        } else { // Net Credit
-            targetPnl = Math.abs(totalEntryCost) * (targetPercent / 100); 
-            slPnl = Math.abs(totalEntryCost) * (Math.abs(slPercent) / 100) * -1;
-        }
-        const newTrade = {
-            tradeId: crypto.randomUUID(),
-            symbol: symbol.toUpperCase(),
-            strategyType, status: "OPEN",
-            entryTimestamp: new Date().toISOString(),
-            legs: processedLegs,
-            netEntryCost: totalEntryCost, 
-            targetPnl, slPnl, currentNetPnl: 0,
-            exitTimestamp: null, exitReason: null
-        };
-        paperTrades.push(newTrade);
-        console.log(`[Paper Sim] New Trade OPENED: ${newTrade.tradeId}`);
-        res.status(201).json(newTrade); 
-    } catch (error) {
-        console.error("[Paper Sim] Failed to place trade:", error.message);
-        res.status(500).json({ error: "Failed to place paper trade.", details: error.message });
-    }
+        const trade = { tradeId: crypto.randomUUID(), symbol, strategyType, status: "OPEN", legs: procLegs, netEntryCost: totalCost, currentNetPnl: 0 };
+        paperTrades.push(trade);
+        res.status(201).json(trade);
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-/**
- * Route: /api/paper-trades (GET)
- */
 app.get('/api/paper-trades', (req, res) => {
-    try {
-        res.json({
-            openTrades: paperTrades.filter(t => t.status === 'OPEN'),
-            closedTrades: paperTrades.filter(t => t.status !== 'OPEN')
-        });
-    } catch (error) {
-        console.error("[Paper Sim] Failed to get trades:", error.message);
-        res.status(500).json({ error: "Failed to retrieve paper trades." });
-    }
+    res.json({ openTrades: paperTrades.filter(t => t.status === 'OPEN'), closedTrades: paperTrades.filter(t => t.status !== 'OPEN') });
 });
 
-/**
- * Paper Trade P&L Simulation Loop
- */
 setInterval(() => {
-    const openTrades = paperTrades.filter(t => t.status === 'OPEN');
-    if (openTrades.length === 0) return;
-    for (const trade of openTrades) {
-        try {
-            let currentNetPnl = 0;
-            let canUpdate = true;
-            for (const leg of trade.legs) {
-                const currentPrice = findCurrentPrice(trade.symbol, leg.strike, leg.optionType);
-                if (currentPrice === null) {
-                    canUpdate = false; 
-                    break; 
-                }
-                leg.currentPrice = currentPrice;
-                const actionMultiplier = (leg.action.toUpperCase() === 'BUY' ? 1 : -1);
-                leg.pnl = (leg.currentPrice - leg.entryPrice) * actionMultiplier * leg.qty;
-                currentNetPnl += leg.pnl;
+    paperTrades.filter(t => t.status === 'OPEN').forEach(trade => {
+        let netPnl = 0;
+        trade.legs.forEach(leg => {
+            const price = findCurrentPrice(trade.symbol, leg.strike, leg.optionType);
+            if (price) {
+                leg.currentPrice = price;
+                leg.pnl = (price - leg.entryPrice) * (leg.action === 'BUY' ? 1 : -1) * leg.qty;
+                netPnl += leg.pnl;
             }
-            if (canUpdate) {
-                trade.currentNetPnl = currentNetPnl;
-                let closeReason = null;
-                if (trade.targetPnl && currentNetPnl >= trade.targetPnl) closeReason = "TARGET_HIT";
-                else if (trade.slPnl && currentNetPnl <= trade.slPnl) closeReason = "SL_HIT";
-                if (closeReason) {
-                    trade.status = "CLOSED";
-                    trade.exitTimestamp = new Date().toISOString();
-                    trade.exitReason = closeReason;
-                    console.log(`[Paper Sim] Trade CLOSED: ${trade.tradeId} (${closeReason})`);
-                }
-            }
-        } catch (err) {
-            console.error(`[Paper Sim] Error simulating PNL for trade ${trade.tradeId}:`, err.message);
-        }
-    }
-}, 5000); // Check P&L every 5 seconds
+        });
+        trade.currentNetPnl = netPnl;
+    });
+}, 2000);
 
-console.log("Paper trading module initialized.");
-
-
-// ==================================================================
-// 9. START SERVER
-// ==================================================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });

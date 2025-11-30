@@ -9,9 +9,10 @@ function putPayoff(spot, strike, premium) {
 
 
 // --- 2. SINGLE LEG STRATEGIES ---
+// These functions take 5 simple arguments
 function longCallPayoff(strike, premium, lots, lotSize, spotPrices) {
     const curve = [];
-    const effectiveLotSize = lotSize || 1; 
+    const effectiveLotSize = lotSize || 1; // Add default
     const totalPremium = premium * lots * effectiveLotSize;
     spotPrices.forEach((spot) => {
         const pnl = (Math.max(0, spot - strike) * lots * effectiveLotSize) - totalPremium;
@@ -85,6 +86,7 @@ function shortPutPayoff(strike, premium, lots, lotSize, spotPrices) {
 
 
 // --- 3. SPREAD STRATEGIES ---
+// These functions take the entire 'params' object
 function bullCallSpreadPayoff(params) {
     const { strike1, premium1, strike2, premium2, lots, lotSize = 1, spotPrices } = params;
     const netPremium = premium1 - premium2;
