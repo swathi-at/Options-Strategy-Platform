@@ -176,3 +176,12 @@ function decideStrategy(signal, spot, daysToExpiry, optionChain, vix, config = {
     if (chosen) return { decision: 'PLACE', strategy: chosen.name, legs: chosen.legs, meta: chosen.meta, score: chosen.score };
     
     return { decision: 'SKIP', reason: `No valid candidates found for ${signal.direction} in current market` };
+}
+
+// Export functions for use by other modules / tests
+module.exports = {
+    decideStrategy,
+    buildCandidate,
+    chooseStrikeByDelta,
+    detectATMStrike
+};

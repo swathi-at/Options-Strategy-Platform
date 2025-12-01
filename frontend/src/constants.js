@@ -1,36 +1,74 @@
+// --- Fyers API Symbol -> User-Friendly Key ---
+export const SYMBOL_CONFIG_KEY_MAP = {
+    // Indices (Weekly Expiry)
+    'NSE:NIFTY50-INDEX': 'NIFTY',
+    'NSE:NIFTYBANK-INDEX': 'BANKNIFTY',
+    'NSE:FINNIFTY-INDEX': 'FINNIFTY',
+    'NSE:MIDCPNIFTY-INDEX': 'MIDCPNIFTY',
+    'BSE:SENSEX-INDEX': 'SENSEX', 
+};
+
 // --- List of All Symbols for Frontend Dropdown ---
-// Note: Only the top 4 are "tradable" with options.
-// The rest are for data analysis (Spot Price).
-const SYMBOL_LIST = {
+export const SYMBOL_LIST = {
     "Tradable Indices": [
-        { name: "NIFTY 50", symbol: "NIFTY" },
-        { name: "NIFTY BANK", symbol: "BANKNIFTY" },
-        { name: "NIFTY FIN SERVICE", symbol: "FINNIFTY" },
-        { name: "NIFTY MIDCAP SELECT", symbol: "MIDCPNIFTY" }
+        { name: "NIFTY 50 (Weekly - Tue/Thu)", symbol: "NIFTY" },
+        { name: "NIFTY BANK (Weekly - Wed)", symbol: "BANKNIFTY" },
+        { name: "NIFTY FIN SERVICE (Weekly - Tue)", symbol: "FINNIFTY" },
+        { name: "NIFTY MIDCAP SELECT (Weekly - Mon)", symbol: "MIDCPNIFTY" }, // Added Midcap Nifty
+        { name: "SENSEX (BSE - Weekly Fri)", symbol: "BSE:SENSEX-INDEX" },
     ],
-    "Sectoral Indices (NSE)": [
-        { name: "NIFTY AUTO", symbol: "NSE:NIFTYAUTO-INDEX" },
-        { name: "NIFTY IT", symbol: "NSE:NIFTYIT-INDEX" },
-        { name: "NIFTY FMCG", symbol: "NSE:NIFTYFMCG-INDEX" },
-        { name: "NIFTY METAL", symbol: "NSE:NIFTYMETAL-INDEX" },
-        { name: "NIFTY PHARMA", symbol: "NSE:NIFTYPHARMA-INDEX" },
-        { name: "NIFTY REALTY", symbol: "NSE:NIFTYREALTY-INDEX" },
-        { name: "NIFTY CONSUMER DURABLES", symbol: "NSE:NIFTYCONSUMERDURABLES-INDEX" },
-        { name: "NIFTY HEALTHCARE", symbol: "NSE:NIFTYHEALTHCARE-INDEX" },
-        { name: "NIFTY MEDIA", symbol: "NSE:NIFTYMEDIA-INDEX" },
-        { name: "NIFTY PRIVATE BANK", symbol: "NSE:NIFTYPRIVATEBANK-INDEX" },
-        { name: "NIFTY PSU BANK", symbol: "NSE:NIFTYPSUBANK-INDEX" },
-        { name: "NIFTY OIL & GAS", symbol: "NSE:NIFTYOIL&GAS-INDEX" },
-    ],
-    "Broad Market Indices (NSE)": [
-        { name: "NIFTY NEXT 50", symbol: "NSE:NIFTYNEXT50-INDEX" },
-        { name: "NIFTY 100", symbol: "NSE:NIFTY100-INDEX" },
-        { name: "NIFTY 500", symbol: "NSE:NIFTY500-INDEX" }
-    ],
-    "Broad Market Indices (BSE)": [
-        { name: "S&P BSE SENSEX", symbol: "BSE:SENSEX-INDEX" }
+    "Nifty 50 Stocks (Monthly Expiry)": [
+        { name: "Reliance Industries", symbol: "NSE:RELIANCE-EQ" },
+        { name: "HDFC Bank", symbol: "NSE:HDFCBANK-EQ" },
+        { name: "ICICI Bank", symbol: "NSE:ICICIBANK-EQ" },
+        { name: "State Bank of India", symbol: "NSE:SBIN-EQ" },
+        { name: "Infosys", symbol: "NSE:INFY-EQ" },
+        { name: "TCS", symbol: "NSE:TCS-EQ" },
+        { name: "Bharti Airtel", symbol: "NSE:BHARTIARTL-EQ" },
+        { name: "LIC India", symbol: "NSE:LICI-EQ" },
+        { name: "Hindustan Unilever", symbol: "NSE:HINDUNILVR-EQ" },
+        { name: "Bajaj Finance", symbol: "NSE:BAJFINANCE-EQ" },
+        { name: "Larsen & Toubro", symbol: "NSE:LT-EQ" },
+        { name: "ITC", symbol: "NSE:ITC-EQ" },
+        { name: "Maruti Suzuki", symbol: "NSE:MARUTI-EQ" },
+        { name: "Kotak Mahindra Bank", symbol: "NSE:KOTAKBANK-EQ" },
+        { name: "Mahindra & Mahindra", symbol: "NSE:M&M-EQ" },
+        { name: "HCL Technologies", symbol: "NSE:HCLTECH-EQ" },
+        { name: "Sun Pharma", symbol: "NSE:SUNPHARMA-EQ" },
+        { name: "Axis Bank", symbol: "NSE:AXISBANK-EQ" },
+        { name: "Titan Company", symbol: "NSE:TITAN-EQ" },
+        { name: "UltraTech Cement", symbol: "NSE:ULTRACEMCO-EQ" },
+        { name: "Bajaj Finserv", symbol: "NSE:BAJAJFINSV-EQ" },
+        { name: "Adani Ports", symbol: "NSE:ADANIPORTS-EQ" },
+        { name: "NTPC", symbol: "NSE:NTPC-EQ" },
+        { name: "Adani Enterprises", symbol: "NSE:ADANIENT-EQ" },
+        { name: "ONGC", symbol: "NSE:ONGC-EQ" },
+        { name: "Apollo Hospitals", symbol: "NSE:APOLLOHOSP-EQ" },
+        { name: "Grasim Industries", symbol: "NSE:GRASIM-EQ" },
+        { name: "Wipro", symbol: "NSE:WIPRO-EQ" },
+        { name: "Asian Paints", symbol: "NSE:ASIANPAINT-EQ" },
+        { name: "Dr. Reddy's Labs", symbol: "NSE:DRREDDY-EQ" },
+        { name: "Pidilite Industries", symbol: "NSE:PIDILITIND-EQ" },
+        { name: "IndusInd Bank", symbol: "NSE:INDUSINDBK-EQ" },
+        { name: "Power Grid Corp", symbol: "NSE:POWERGRID-EQ" },
+        { name: "Coal India", symbol: "NSE:COALINDIA-EQ" },
+        { name: "JSW Steel", symbol: "NSE:JSWSTEEL-EQ" },
+        { name: "Tech Mahindra", symbol: "NSE:TECHM-EQ" },
+        { name: "Tata Steel", symbol: "NSE:TATASTEEL-EQ" },
+        { name: "Indian Oil Corp", symbol: "NSE:IOC-EQ" },
+        { name: "BPCL", symbol: "NSE:BPCL-EQ" },
+        { name: "GAIL", symbol: "NSE:GAIL-EQ" },
+        { name: "Hindalco", symbol: "NSE:HINDALCO-EQ" },
+        { name: "Cipla", symbol: "NSE:CIPLA-EQ" },
+        { name: "UPL", symbol: "NSE:UPL-EQ" },
+        { name: "Divi's Labs", symbol: "NSE:DIVISLAB-EQ" },
+        { name: "Hindustan Zinc", symbol: "NSE:HINDZINC-EQ" },
+        { name: "Tata Motors", symbol: "NSE:TATAMOTORS-EQ" },
+        { name: "Eicher Motors", symbol: "NSE:EICHERMOT-EQ" },
+        { name: "Adani Green Energy", symbol: "NSE:ADANIGREEN-EQ" },
+        { name: "HDFC Life", symbol: "NSE:HDFCLIFE-EQ" },
+        { name: "Britannia", symbol: "NSE:BRITANNIA-EQ" }
     ]
-    // ... You can add all other groups and symbols from your lead's list here
 };
 
 // --- Config for Tradable Symbols ---
@@ -38,15 +76,16 @@ export const SYMBOL_LOT_SIZES = {
     'NIFTY': 25,
     'BANKNIFTY': 15,
     'FINNIFTY': 40,
-    'MIDCPNIFTY': 75
+    'MIDCPNIFTY': 75,
+    'SENSEX': 10,
 };
 
 export const SYMBOL_STRIKE_INCREMENT = {
     'NIFTY': 50,
     'BANKNIFTY': 100,
     'FINNIFTY': 50,
-    'MIDCPNIFTY': 25
+    'MIDCPNIFTY': 25,
+    'SENSEX': 100,
 };
 
-// --- Use export default for React ---
 export default SYMBOL_LIST;

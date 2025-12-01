@@ -2,16 +2,66 @@ import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import TradePanel from "./components/TradePanel"; 
-import SYMBOL_LIST, { SYMBOL_LOT_SIZES, SYMBOL_STRIKE_INCREMENT } from './constants'; 
+// UPDATED IMPORT: Added SYMBOL_CONFIG_KEY_MAP to fix SENSEX lookup
+import SYMBOL_LIST, { SYMBOL_LOT_SIZES, SYMBOL_STRIKE_INCREMENT, SYMBOL_CONFIG_KEY_MAP } from './constants'; 
 import AlgoDashboard from "./components/AlgoDashboard";
 
 // --- CONFIG ---
-// WARNING: Do not commit this key to a public repository
-const API_KEY = "YOUR_GEMINI_KEY"; // Replace with your actual Gemini Key
+const API_KEY = ""; // Keep empty or use your key
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}`;
 const BACKEND_URL = 'http://localhost:5000';
+const WS_URL = 'ws://localhost:8080';
 
-// --- STRATEGY DEFINITIONS (Existing Config) ---
+// --- HELPER TO RESOLVE SYMBOL KEY (CRITICAL FIX FOR SENSEX) ---
+// This ensures that 'BSE:SENSEX-INDEX' is read as 'SENSEX' to find the Lot Size
+const getSymbolKey = (symbol) => {
+    if (!symbol) return null;
+    // 1. Check direct map (e.g., BSE:SENSEX-INDEX -> SENSEX)
+    if (SYMBOL_CONFIG_KEY_MAP[symbol]) return SYMBOL_CONFIG_KEY_MAP[symbol];
+    // 2. Handle Stocks (NSE:RELIANCE-EQ -> RELIANCE)
+    if (symbol.includes('NSE:') && symbol.includes('-EQ')) {
+        return symbol.split(':')[1].replace('-EQ', '');
+    }
+    // 3. Fallback (e.g., NIFTY)
+    return symbol;
+};
+
+// --- LIVE CANDLE CHART COMPONENT ---
+const LiveCandleChart = ({ data }) => {
+    if (!data || data.length === 0) return (
+        <div className="h-64 flex items-center justify-center bg-gray-50 dark:bg-gray-800 rounded border border-dashed border-gray-300 dark:border-gray-600">
+            <span className="text-gray-400">Waiting for Live Data Stream...</span>
+        </div>
+    );
+    
+    return (
+        <div className="h-72 w-full bg-white dark:bg-gray-800 rounded p-4 shadow border border-gray-200 dark:border-gray-700">
+            <div className="flex justify-between items-center mb-2">
+                {/* UPDATED LABEL TO 1-MIN */}
+                <h3 className="text-sm font-bold text-indigo-600 dark:text-indigo-400">Live Market Feed (1-Min Candles)</h3>
+                <span className="text-xs text-gray-500">Live WebSocket</span>
+            </div>
+            <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={data}>
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.1} />
+                    <XAxis 
+                        dataKey="time" 
+                        tickFormatter={(tick) => new Date(tick * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} 
+                        tick={{fontSize: 10}}
+                    />
+                    <YAxis domain={['auto', 'auto']} tick={{fontSize: 10}} width={40} />
+                    <Tooltip 
+                        labelFormatter={(label) => new Date(label * 1000).toLocaleTimeString()}
+                        contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff', fontSize: '12px' }}
+                    />
+                    <Line type="monotone" dataKey="close" stroke="#8884d8" dot={false} strokeWidth={2} isAnimationActive={false} />
+                </LineChart>
+            </ResponsiveContainer>
+        </div>
+    );
+};
+
+// --- STRATEGY DEFINITIONS ---
 const strategyGroups = [
     {
         label: "Bullish Strategies",
@@ -127,72 +177,36 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
 };
 
 const findAtmStrike = (spot, symbolKey) => {
-    const configKey = Object.keys(SYMBOL_STRIKE_INCREMENT).find(key => key === symbolKey.toUpperCase());
-    const increment = configKey ? SYMBOL_STRIKE_INCREMENT[configKey] : 50; 
+    // FIX: Resolve the key properly before looking up increment
+    const resolvedKey = getSymbolKey(symbolKey);
+    const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50; 
     return Math.round(spot / increment) * increment;
 };
 
 const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolKey) => {
     const newForm = { ...currentForm };
-    const configKey = Object.keys(SYMBOL_STRIKE_INCREMENT).find(key => key === symbolKey.toUpperCase());
-    const increment = configKey ? SYMBOL_STRIKE_INCREMENT[configKey] : 50;
+    // FIX: Resolve the key properly for increments
+    const resolvedKey = getSymbolKey(symbolKey);
+    const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50;
 
     switch (currentStrategy) {
-        // --- Single Leg / Central Strike Strategies ---
-        case 'long-call': 
-        case 'long-put': 
-        case 'short-call': 
-        case 'short-put': 
-        case 'long-straddle': 
-        case 'short-straddle':
-        case 'synthetic-long-stock':  // [ADDED]
-        case 'synthetic-short-stock': // [ADDED]
-        case 'calendar-spread':       // [ADDED]
-            newForm.strike = atmStrike; 
-            break;
-
-        // --- 2-Strike Spreads ---
-        case 'bull-call-spread': 
-        case 'bear-call-spread':
-            newForm.strike1 = atmStrike; 
-            newForm.strike2 = atmStrike + increment; 
-            break;
-        case 'bull-put-spread': 
-        case 'bear-put-spread':
-            newForm.strike1 = atmStrike; 
-            newForm.strike2 = atmStrike - increment; 
-            break;
-        case 'long-strangle':
-        case 'short-strangle':
-            newForm.strike1 = atmStrike - increment; // OTM Put
-            newForm.strike2 = atmStrike + increment; // OTM Call
-            break;
-
-        // --- 3-Strike Strategies ---
-        case 'call-butterfly':
-        case 'iron-butterfly':
-            newForm.strike1 = atmStrike - increment;
-            newForm.strike2 = atmStrike;
-            newForm.strike3 = atmStrike + increment;
-            break;
-
-        // --- 4-Strike Strategies ---
+        case 'long-call': case 'long-put': case 'short-call': case 'short-put': 
+        case 'long-straddle': case 'short-straddle': case 'synthetic-long-stock': case 'synthetic-short-stock': case 'calendar-spread':
+            newForm.strike = atmStrike; break;
+        case 'bull-call-spread': case 'bear-call-spread':
+            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike + increment; break;
+        case 'bull-put-spread': case 'bear-put-spread':
+            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike - increment; break;
+        case 'long-strangle': case 'short-strangle':
+            newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike + increment; break;
+        case 'call-butterfly': case 'iron-butterfly':
+            newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike; newForm.strike3 = atmStrike + increment; break;
         case 'iron-condor':
-            newForm.strike1 = atmStrike - (2 * increment);
-            newForm.strike2 = atmStrike - increment;
-            newForm.strike3 = atmStrike + increment;
-            newForm.strike4 = atmStrike + (2 * increment); 
-            break;
-            
-        // --- Stock Price Dependent ---
-        case 'protective-put':
-        case 'protective-call':
-            newForm.stockPrice = atmStrike; // Approx spot
-            newForm.strike = atmStrike;
-            break;
-
-        default: 
-            break;
+            newForm.strike1 = atmStrike - (2 * increment); newForm.strike2 = atmStrike - increment;
+            newForm.strike3 = atmStrike + increment; newForm.strike4 = atmStrike + (2 * increment); break;
+        case 'protective-put': case 'protective-call':
+            newForm.stockPrice = atmStrike; newForm.strike = atmStrike; break;
+        default: break;
     }
     return newForm;
 };
@@ -218,106 +232,96 @@ function App() {
     const [theme, setTheme] = useState('light');
     const [showTradePanel, setShowTradePanel] = useState(false);
 
-    // --- NEW STATES FOR GREEKS & DEPLOYMENT ---
+    // --- PHASE 4 STATES ---
     const [isLiveMode, setIsLiveMode] = useState(false);
     const [liveData, setLiveData] = useState(null);
     const [liveDataLoading, setLiveDataLoading] = useState(false);
     const [liveDataError, setLiveDataError] = useState(null);
     const [decisionResult, setDecisionResult] = useState(null); 
     const [signalStrength, setSignalStrength] = useState({ direction: 'BULL', strength: 'MODERATE' }); 
+    const [candleData, setCandleData] = useState([]);
+    const [livePnl, setLivePnl] = useState(null);
 
+    // --- THEME & WEBSOCKET ---
     useEffect(() => {
         document.documentElement.classList.toggle('dark', theme === 'dark');
     }, [theme]);
     const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
 
-    // --- Premium Auto-filler (Updated for Greeks structure) ---
+    useEffect(() => {
+        const ws = new WebSocket(WS_URL);
+        ws.onopen = () => console.log('Connected to UI Stream');
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'HISTORY') setCandleData(msg.data);
+            if (msg.type === 'CANDLE_CLOSE' || msg.type === 'TICK') {
+                setCandleData(prev => {
+                    const newData = [...prev];
+                    const lastIdx = newData.length - 1;
+                    if (lastIdx >= 0 && newData[lastIdx].time === msg.candle.time) {
+                        newData[lastIdx] = msg.candle; 
+                    } else {
+                        newData.push(msg.candle); 
+                    }
+                    return newData.slice(-60); // Keep last 60 candles
+                });
+            }
+            if (msg.type === 'PNL_UPDATE') setLivePnl(msg);
+            if (msg.type === 'TRADE_CLOSE') {
+                alert(msg.message);
+                setLivePnl(null);
+            }
+        };
+        return () => ws.close();
+    }, []);
+
+    // --- PREMIUM AUTO-FILLER ---
     const updateAllPremiums = useCallback((currentForm, currentStrategy, currentSymbolData) => {
-        if (!currentSymbolData || !currentSymbolData.options || currentSymbolData.options.length === 0) {
-            return currentForm;
-        }
+        if (!currentSymbolData || !currentSymbolData.options || currentSymbolData.options.length === 0) return currentForm;
         
         const newForm = { ...currentForm };
         const findPrice = (strike, type) => {
             if (!strike) return '';
             const opt = currentSymbolData.options.find(o => o.strike === Number(strike));
-            if (!opt) return '';
-            return (type === 'CE') ? opt.CE_Ltp : opt.PE_Ltp;
+            return opt ? ((type === 'CE') ? opt.CE_Ltp : opt.PE_Ltp) : '';
         };
 
-        // --- MAP STRATEGIES TO PREMIUMS ---
-        
-        // Single Leg & Simple
-        if (['long-call', 'short-call', 'protective-call'].includes(currentStrategy)) {
+        if (['long-call', 'short-call', 'protective-call', 'synthetic-long-stock', 'synthetic-short-stock'].includes(currentStrategy)) {
             newForm.premium = findPrice(newForm.strike, 'CE');
+            if(currentStrategy.includes('synthetic')) newForm.premium2 = findPrice(newForm.strike, 'PE');
         } 
         else if (['long-put', 'short-put', 'protective-put'].includes(currentStrategy)) {
             newForm.premium = findPrice(newForm.strike, 'PE');
         }
-        // Spreads (Call)
         else if (['bull-call-spread', 'bear-call-spread'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'CE'); 
-            newForm.premium2 = findPrice(newForm.strike2, 'CE');
+            newForm.premium1 = findPrice(newForm.strike1, 'CE'); newForm.premium2 = findPrice(newForm.strike2, 'CE');
         } 
-        // Spreads (Put)
         else if (['bull-put-spread', 'bear-put-spread'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
-            newForm.premium2 = findPrice(newForm.strike2, 'PE');
+            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'PE');
         } 
-        // Straddles (1 Strike, Both Types)
-        else if (['long-straddle', 'short-straddle'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike, 'CE'); 
-            newForm.premium2 = findPrice(newForm.strike, 'PE');
+        else if (['long-straddle', 'short-straddle', 'calendar-spread'].includes(currentStrategy)) {
+            newForm.premium1 = findPrice(newForm.strike, 'CE'); newForm.premium2 = findPrice(newForm.strike, 'PE');
+            if(currentStrategy === 'calendar-spread') newForm.premium2 = findPrice(newForm.strike, 'CE'); // Simplification
         } 
-        // Strangles (2 Strikes: Put lower, Call higher)
         else if (['long-strangle', 'short-strangle'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
-            newForm.premium2 = findPrice(newForm.strike2, 'CE');
+            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'CE');
         }
-        // Synthetics (1 Strike, Both Types)
-        else if (['synthetic-long-stock', 'synthetic-short-stock'].includes(currentStrategy)) {
-            newForm.premium = findPrice(newForm.strike, 'CE'); 
-            newForm.premium2 = findPrice(newForm.strike, 'PE');
-        }
-        // Butterflies
-        else if (currentStrategy === 'call-butterfly') {
-            newForm.premium1 = findPrice(newForm.strike1, 'CE');
-            newForm.premium2 = findPrice(newForm.strike2, 'CE');
-            newForm.premium3 = findPrice(newForm.strike3, 'CE');
-        }
-        else if (currentStrategy === 'iron-butterfly') {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Wing
-            newForm.premium2 = findPrice(newForm.strike2, 'PE'); // Body
-            newForm.premium3 = findPrice(newForm.strike2, 'CE'); // Body
-            newForm.premium4 = findPrice(newForm.strike3, 'CE'); // Wing
-        }
-        // Iron Condor
         else if (currentStrategy === 'iron-condor') {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
-            newForm.premium2 = findPrice(newForm.strike2, 'PE');
-            newForm.premium3 = findPrice(newForm.strike3, 'CE'); 
-            newForm.premium4 = findPrice(newForm.strike4, 'CE');
+            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'PE');
+            newForm.premium3 = findPrice(newForm.strike3, 'CE'); newForm.premium4 = findPrice(newForm.strike4, 'CE');
         }
-        // Calendar Spread (Limitation: Can only fetch same expiry price currently)
-        else if (currentStrategy === 'calendar-spread') {
-            newForm.premium1 = findPrice(newForm.strike, 'CE'); 
-            newForm.premium2 = findPrice(newForm.strike, 'CE');
-        }
-
         return newForm;
     }, []);
 
-    // --- LIVE DATA HANDLER (FETCH WITH GREEKS) ---
+    // --- LIVE DATA FETCH ---
     const fetchLiveData = async () => {
-        setLiveDataLoading(true);
-        setLiveDataError(null);
+        setLiveDataLoading(true); setLiveDataError(null);
         try {
-            // New Endpoint with Greeks
             const res = await axios.get(`${BACKEND_URL}/api/live-data-with-greeks/${symbol}`);
             const liveApiData = res.data;
             setLiveData(liveApiData);
 
-            // Automation for Manual Builder
+            // Auto-Fill Manual Builder
             const symbolKey = liveApiData.symbol; 
             const atmStrike = findAtmStrike(liveApiData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
@@ -325,7 +329,6 @@ function App() {
                 newForm = updateAllPremiums(newForm, strategy, liveApiData);
             }
             setForm(newForm);
-
         } catch (err) {
             setLiveDataError('Failed to fetch live Greeks data.');
             setIsLiveMode(false);
@@ -337,80 +340,66 @@ function App() {
     const toggleLiveMode = () => {
         if (!isLiveMode) {
             setIsLiveMode(true);
-            fetchLiveData(); // Initial fetch
-            // Set interval for polling would happen here in a real app
+            fetchLiveData(); 
         } else {
             setIsLiveMode(false);
             setLiveData(null);
         }
     };
 
-    // --- AUTO DEPLOY (DECISION ENGINE) ---
+    // --- AUTO DEPLOY (PHASE 4 CORE) ---
     const handleAutoDeploy = async () => {
-        if (!liveData) {
-            alert("Please start Live Greeks mode first to fetch market data.");
-            return;
-        }
+        if (!liveData) { alert("Please start Live Greeks mode first."); return; }
         try {
-            const payload = { symbol: symbol, signal: signalStrength };
-            const res = await axios.post(`${BACKEND_URL}/api/decide-and-build-order`, payload);
+            // 1. Get Decision
+            const res = await axios.post(`${BACKEND_URL}/api/decide-and-build-order`, { symbol, signal: signalStrength });
             setDecisionResult(res.data);
             
+            // 2. Execute Trade (Auto)
             if (res.data.decision === 'PLACE') {
-                // Optional: Auto-populate manual form with decision
-                // alert(`Engine Selected: ${res.data.strategy}`);
-            } 
+                const execRes = await axios.post(`${BACKEND_URL}/api/execute-trade`, { 
+                    strategy: res.data.strategy, 
+                    decisionData: res.data 
+                });
+                if(execRes.data.success) {
+                    alert("✅ Auto-Trade Executed! Risk Manager is now monitoring.");
+                }
+            } else {
+                alert(`Engine Skipped: ${res.data.reason}`);
+            }
         } catch (e) {
             console.error(e);
-            alert("Deployment failed check console.");
+            alert("Deployment failed. Check console.");
         }
     };
 
-    // --- EVENT HANDLERS ---
+    // --- HANDLERS ---
     const handleSymbolChange = (e) => {
         const newSymbol = e.target.value;
         setSymbol(newSymbol);
-        const configKey = Object.keys(SYMBOL_LOT_SIZES).find(key => key === newSymbol.toUpperCase());
-        setForm({ ...defaultFormState, lotSize: configKey ? SYMBOL_LOT_SIZES[configKey] : 1 });
-        setData(null); setError(null); setAnalysis("");
-        setIsLiveMode(false); setLiveData(null); setDecisionResult(null);
+        
+        // --- FIX FOR SENSEX/STOCKS ---
+        const configKey = getSymbolKey(newSymbol); // Use helper function
+        const newLotSize = (configKey && SYMBOL_LOT_SIZES[configKey]) ? SYMBOL_LOT_SIZES[configKey] : 1;
+        
+        setForm({ ...defaultFormState, lotSize: newLotSize });
+        setData(null); setError(null); setAnalysis(""); setIsLiveMode(false); setLiveData(null); setDecisionResult(null); setLivePnl(null);
     };
 
-   const handleStrategyChange = (e) => {
+    const handleStrategyChange = (e) => {
         const newStrategy = e.target.value;
         setStrategy(newStrategy);
-        setData(null); 
-        setError(null); 
-        setAnalysis("");
+        setData(null); setError(null); setAnalysis("");
 
-        // --- NEW LOGIC: Auto-fill if Live Mode is already ON ---
         if (isLiveMode && liveData) {
-            // 1. Find the Config Key (e.g., NIFTY)
-            const symbolKey = liveData.symbol || Object.keys(SYMBOL_LOT_SIZES).find(key => key === symbol.toUpperCase());
-            
-            // 2. Find ATM based on current cached Spot Price
+            const symbolKey = liveData.symbol || symbol;
             const atmStrike = findAtmStrike(liveData.spot, symbolKey);
-
-            // 3. Calculate new Strikes for the NEW strategy
             let newForm = autoFillPrimaryStrikes(defaultFormState, newStrategy, atmStrike, symbolKey);
-
-            // 4. Fill Premiums for those new strikes
-            if (liveData.options && liveData.options.length > 0) {
-                newForm = updateAllPremiums(newForm, newStrategy, liveData);
-            }
-
-            // 5. Preserve Lot Size and Risk Settings from previous state
+            if (liveData.options.length > 0) newForm = updateAllPremiums(newForm, newStrategy, liveData);
             newForm.lotSize = form.lotSize;
-            newForm.targetPercent = form.targetPercent;
-            newForm.slPercent = form.slPercent;
-
             setForm(newForm);
         } else {
-            // If NOT Live, just reset to defaults
-            setForm(prevForm => ({ 
-                ...defaultFormState, 
-                lotSize: prevForm.lotSize 
-            }));
+            setForm(prevForm => ({ ...defaultFormState, lotSize: prevForm.lotSize }));
         }
     };
 
@@ -424,17 +413,8 @@ function App() {
     };
 
     const handleReset = () => {
-        const currentSymbol = symbol;
-        const currentStrategy = strategy;
         setForm(defaultFormState);
-        setData(null); setError(null); setAnalysis(""); setStrategy(''); setSymbol('NIFTY'); 
-        setIsLiveMode(false); setLiveData(null); setDecisionResult(null);
-        setTimeout(() => {
-            setSymbol(currentSymbol);
-            setStrategy(currentStrategy);
-            const configKey = Object.keys(SYMBOL_LOT_SIZES).find(key => key === currentSymbol.toUpperCase());
-            setForm(prev => ({ ...defaultFormState, lotSize: configKey ? SYMBOL_LOT_SIZES[configKey] : 1 }));
-        }, 0);
+        setData(null); setError(null); setAnalysis(""); setDecisionResult(null); setLivePnl(null);
     };
 
     const handleSubmit = async () => {
@@ -453,10 +433,7 @@ function App() {
     };
 
     const handleAnalysis = async () => {
-        if (!data || !API_KEY || API_KEY.includes("YOUR_GEMINI_KEY")) {
-            setAnalysis("Please add your Gemini API Key in the App.js file.");
-            return;
-        }
+        if (!data) return;
         setIsAnalyzing(true); setAnalysis("");
         const strategyName = strategyConfigs[strategy].name;
         const prompt = `Analyze this options strategy: ${strategyName}. Params: ${JSON.stringify(form)}. Max Profit: ${data.maxProfit}, Max Loss: ${data.maxLoss}.`;
@@ -465,35 +442,27 @@ function App() {
             const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             const result = await response.json();
             setAnalysis(result.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis.");
-        } catch (error) {
-            setAnalysis(`Error: ${error.message}`);
-        } finally {
-            setIsAnalyzing(false);
-        }
+        } catch (error) { setAnalysis(`Error: ${error.message}`); } finally { setIsAnalyzing(false); }
     };
 
     const handleSimulateTrade = async () => {
         if (!data) return;
-        const symbolKey = liveData?.symbol || Object.keys(SYMBOL_LOT_SIZES).find(key => key === symbol.toUpperCase()) || symbol;
+        const symbolKey = liveData?.symbol || getSymbolKey(symbol) || symbol;
         const tradePayload = translateFormToTrade(strategy, form, symbolKey);
         if (!tradePayload) return;
         try {
             await axios.post(`${BACKEND_URL}/api/paper-trade`, tradePayload);
             setShowTradePanel(true);
-        } catch (err) {
-            setError(err.response ? err.response.data.error : "Error submitting paper trade.");
-        }
+        } catch (err) { setError("Error submitting paper trade."); }
     };
 
     const formatValue = (value) => (typeof value === 'number') ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value;
 
-    // --- UI RENDER: Greeks Table ---
+    // --- RENDER GREEKS TABLE ---
     const renderGreeksTable = () => {
         if (!liveData || !liveData.options) return null;
-        const atmIndex = liveData.options.reduce((closestIdx, opt, idx, arr) => 
-            Math.abs(opt.strike - liveData.spot) < Math.abs(arr[closestIdx].strike - liveData.spot) ? idx : closestIdx
-        , 0);
-       const subset = liveData.options.slice(Math.max(0, atmIndex - 10), Math.min(liveData.options.length, atmIndex + 11));
+        const atmIndex = liveData.options.reduce((closestIdx, opt, idx, arr) => Math.abs(opt.strike - liveData.spot) < Math.abs(arr[closestIdx].strike - liveData.spot) ? idx : closestIdx, 0);
+        const subset = liveData.options.slice(Math.max(0, atmIndex - 6), Math.min(liveData.options.length, atmIndex + 7));
 
         return (
             <div className="mt-4 overflow-x-auto bg-white dark:bg-gray-800 p-4 rounded shadow">
@@ -524,7 +493,10 @@ function App() {
         );
     };
 
-    const currentConfigKey = Object.keys(SYMBOL_LOT_SIZES).find(key => key === symbol.toUpperCase());
+    // --- REPLACED BUGGY DIRECT LOOKUP WITH HELPER ---
+    // Now uses getSymbolKey() to ensure hasValidConfig is TRUE for SENSEX/Stocks
+    const resolvedConfigKey = getSymbolKey(symbol);
+    const hasValidConfig = !!(resolvedConfigKey && SYMBOL_LOT_SIZES[resolvedConfigKey]);
 
     return (
         <div className="p-4 md:p-8 max-w-7xl mx-auto font-sans bg-gray-50 dark:bg-gray-900 min-h-screen">
@@ -535,47 +507,88 @@ function App() {
 
             <AlgoDashboard />
 
-            {/* --- NEW DEPLOYMENT PANEL --- */}
+            {/* --- PHASE 4 DEPLOYMENT PANEL --- */}
             <div className="p-6 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg mb-8 shadow-sm">
-                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-4">
-                    <div>
-                        <h2 className="text-xl font-bold text-indigo-800 dark:text-indigo-300">Strategy Auto-Deployer</h2>
-                        <p className="text-sm text-indigo-600 dark:text-indigo-400">Days To Expiry: {liveData?.daysToExpiry !== undefined ? liveData.daysToExpiry : 'N/A'}</p>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* LEFT: CONTROLS */}
+                    <div className="space-y-4">
+                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center">
+                            <div>
+                                <h2 className="text-xl font-bold text-indigo-800 dark:text-indigo-300">Auto-Execute Engine</h2>
+                                <p className="text-sm text-indigo-600 dark:text-indigo-400">Days To Expiry: {liveData?.daysToExpiry !== undefined ? liveData.daysToExpiry : 'N/A'}</p>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                             <div>
+                                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Select Instrument</label>
+                                <select className="w-full p-2 rounded border dark:bg-gray-700 dark:text-white dark:border-gray-600" value={symbol} onChange={handleSymbolChange} disabled={isLiveMode}>
+                                    {Object.entries(SYMBOL_LIST).map(([cat, items]) => (
+                                        <optgroup label={cat} key={cat}>
+                                            {items.map(s => <option key={s.symbol} value={s.symbol}>{s.name}</option>)}
+                                        </optgroup>
+                                    ))}
+                                </select>
+                             </div>
+                             <div>
+                                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Manual Signal</label>
+                                <select className="w-full p-2 rounded border dark:bg-gray-700 dark:text-white dark:border-gray-600" onChange={(e) => setSignalStrength({...signalStrength, direction: e.target.value})}>
+                                    <option value="BULL">Signal: BULL</option>
+                                    <option value="BEAR">Signal: BEAR</option>
+                                    <option value="NEUTRAL">Signal: NEUTRAL</option>
+                                </select>
+                             </div>
+                        </div>
+
+                        <div className="flex gap-3">
+                            <button onClick={toggleLiveMode} className={`flex-1 px-4 py-2 rounded text-white font-medium shadow ${isLiveMode ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>
+                                {isLiveMode ? 'Stop Feed' : 'Start Feed'}
+                            </button>
+                            <button onClick={handleAutoDeploy} disabled={!isLiveMode} className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded font-medium shadow hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                                🤖 Run Engine
+                            </button>
+                        </div>
+
+                        {/* DECISION & PNL DISPLAY */}
+                        <div className="space-y-2 mt-4">
+                            {decisionResult && (
+                                <div className="p-3 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
+                                    <div className="flex justify-between items-center mb-1">
+                                        <span className={`font-bold px-2 py-0.5 rounded text-xs ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                            {decisionResult.decision}
+                                        </span>
+                                        <span className="text-xs text-gray-500">Score: {decisionResult.score || 0}</span>
+                                    </div>
+                                    {decisionResult.strategy && <p className="font-semibold text-gray-800 dark:text-gray-100">{decisionResult.strategy}</p>}
+                                    {decisionResult.decision === 'SKIP' && <p className="text-red-500">{decisionResult.reason}</p>}
+                                </div>
+                            )}
+
+                            {livePnl && (
+                                <div className={`p-3 rounded shadow text-white transition-colors ${livePnl.pnl >= 0 ? 'bg-green-600' : 'bg-red-600'}`}>
+                                    <div className="flex justify-between items-center">
+                                        <span className="font-bold text-lg">Active P&L</span>
+                                        <span className="text-xl font-mono">{livePnl.pnl.toFixed(2)} ({livePnl.pnlPercent.toFixed(2)}%)</span>
+                                    </div>
+                                    <div className="text-xs opacity-80 mt-1 border-t border-white/20 pt-1 flex justify-between">
+                                        <span>Risk Manager Active</span>
+                                        <span>Target: +10% | SL: -20%</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     </div>
-                    <div className="flex gap-3 mt-2 md:mt-0">
-                         <select className="p-2 rounded border dark:bg-gray-700 dark:border-gray-600" onChange={(e) => setSignalStrength({...signalStrength, direction: e.target.value})}>
-                            <option value="BULL">Signal: BULL</option>
-                            <option value="BEAR">Signal: BEAR</option>
-                            <option value="NEUTRAL">Signal: NEUTRAL</option>
-                        </select>
-                        <button onClick={toggleLiveMode} className={`px-4 py-2 rounded text-white font-medium ${isLiveMode ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>
-                            {isLiveMode ? 'Stop Live Data' : 'Start Live Greeks'}
-                        </button>
-                        <button onClick={handleAutoDeploy} disabled={!isLiveMode} className="bg-indigo-600 text-white px-4 py-2 rounded font-medium hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
-                            🤖 Run Decision Engine
-                        </button>
+
+                    {/* RIGHT: LIVE CHART */}
+                    <div>
+                         <LiveCandleChart data={candleData} />
                     </div>
                 </div>
-
-                {decisionResult && (
-                    <div className="p-4 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm animate-fade-in">
-                        <div className="flex justify-between items-center">
-                            <span className={`font-bold px-2 py-1 rounded text-sm ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                {decisionResult.decision}
-                            </span>
-                            <span className="text-sm text-gray-500">Score: {decisionResult.score || 0}</span>
-                        </div>
-                        {decisionResult.strategy && <p className="mt-2 text-lg font-semibold text-gray-800 dark:text-gray-100">Strategy: {decisionResult.strategy}</p>}
-                        {decisionResult.meta && <p className="text-sm text-gray-600 dark:text-gray-400">{decisionResult.meta.description}</p>}
-                        {decisionResult.decision === 'SKIP' && <p className="text-sm text-red-500 mt-1">Reason: {decisionResult.reason}</p>}
-                    </div>
-                )}
             </div>
 
             {/* --- GREEKS TABLE --- */}
             {isLiveMode && renderGreeksTable()}
-            {liveDataError && <p className="text-red-500 text-sm mt-2">{liveDataError}</p>}
-
+            {liveDataError && <p className="text-red-500 text-sm mt-2 text-center">{liveDataError}</p>}
 
             {/* --- MANUAL BUILDER (Existing) --- */}
             <div className="mt-8 p-6 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-md mb-8">
@@ -587,8 +600,13 @@ function App() {
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
                     <div className="col-span-2 md:col-span-1">
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Symbol</label>
+                        {/* Sync Manual Dropdown with Live Mode Dropdown */}
                         <select value={symbol} onChange={handleSymbolChange} disabled={isLiveMode} className="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
-                            {Object.entries(SYMBOL_LIST).map(([g, s]) => ( <optgroup key={g} label={g}>{s.map(x => <option key={x.symbol} value={x.symbol}>{x.name}</option>)}</optgroup> ))}
+                             {Object.entries(SYMBOL_LIST).map(([cat, items]) => (
+                                <optgroup label={cat} key={cat}>
+                                    {items.map(s => <option key={s.symbol} value={s.symbol}>{s.name}</option>)}
+                                </optgroup>
+                            ))}
                         </select>
                     </div>
                     <div className="col-span-2 md:col-span-1">
@@ -599,14 +617,15 @@ function App() {
                     </div>
                     
                     {strategy && strategyConfigs[strategy]?.fields.map(field => {
-                        if (field === 'lotSize' && !currentConfigKey) return null;
-                        if (!currentConfigKey && (field.startsWith('premium') || field.startsWith('strike') || field === 'stockPrice')) return null;
+                        // FIX: Use the resolved boolean (from getSymbolKey) to allow showing inputs for SENSEX/Stocks
+                        if (field === 'lotSize' && !hasValidConfig) return null;
+                        if (!hasValidConfig && (field.startsWith('premium') || field.startsWith('strike') || field === 'stockPrice')) return null;
                         return (
                             <div key={field} className="col-span-1">
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{formatLabel(field, strategy)}</label>
                                 <input type="number" name={field} value={form[field] || ''} onChange={handleChange} 
                                     disabled={(isLiveMode && field.startsWith('premium'))}
-                                    className={`w-full p-2 border rounded dark:bg-gray-700 dark:text-white ${isLiveMode && field.startsWith('premium') ? 'bg-gray-100' : ''}`} placeholder="0" />
+                                    className={`w-full p-2 border rounded dark:bg-gray-700 dark:text-white ${isLiveMode && field.startsWith('premium') ? 'bg-gray-100 dark:bg-gray-600' : ''}`} placeholder="0" />
                             </div>
                         )
                     })}
@@ -627,7 +646,8 @@ function App() {
                     <div className="flex justify-between items-center mb-6 border-b pb-2">
                         <h2 className="text-xl font-semibold dark:text-gray-200">Results</h2>
                         <div className="flex space-x-2">
-                            {currentConfigKey && <button onClick={handleSimulateTrade} className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">📈 Simulate Trade</button>}
+                            {/* FIX: Use resolved boolean here too */}
+                            {hasValidConfig && <button onClick={handleSimulateTrade} className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">📈 Simulate Trade</button>}
                             <button onClick={handleAnalysis} disabled={isAnalyzing} className="bg-purple-600 text-white px-3 py-1 rounded hover:bg-purple-700">{isAnalyzing ? '...' : '✨ Analyze'}</button>
                         </div>
                     </div>

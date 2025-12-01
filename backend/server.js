@@ -7,9 +7,12 @@ const cors = require('cors');
 const axios = require('axios');
 const otpauth = require('otpauth');
 const crypto = require('crypto');
+const fs = require('fs'); // NEW: File System for Logging
+const path = require('path'); // NEW: Path handling
+// CRITICAL IMPORT: This line defines fyersModel. Do not remove.
 const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
-const { calculateStrategy } = require('./strategyengine'); // Keep this
-const { SYMBOL_LOT_SIZES } = require('./constants'); // Keep this
+const { calculateStrategy } = require('./strategyengine'); 
+const { SYMBOL_LOT_SIZES } = require('./constants'); 
 const { WebSocketServer } = require('ws');
 
 const app = express();
@@ -21,6 +24,7 @@ app.use(express.json());
 // ==================================================================
 const liveDataCache = {}; 
 const CACHE_DURATION_MS = 20 * 1000; 
+const LOG_FILE_PATH = path.join(__dirname, 'trade_logs.csv'); // Log File
 
 const FYERS_APP_ID = process.env.FYERS_CLIENT_ID;
 const FYERS_SECRET_KEY = process.env.FYERS_SECRET_KEY;
@@ -37,8 +41,12 @@ let isAlgoRunning = false;
 let livePositions = []; 
 let candleHistory = [];
 let currentCandle = null;
-let algoState = { symbol: "NSE:IDEA-EQ", interval: 3, qty: 1, stopLossPoints: 0.25, targetPoints: 0.50, isInTrade: false };
+let algoState = { symbol: "NSE:NIFTY50-INDEX", interval: 1, qty: 1, isInTrade: false };
 
+// Global Socket Instance
+let fyersSocket = null; 
+
+// Initialize Login Instance
 const fyersLoginInstance = new fyersModel();
 if (FYERS_APP_ID) {
     fyersLoginInstance.setAppId(FYERS_APP_ID);
@@ -51,6 +59,23 @@ function getEncodedString(string) {
     return Buffer.from(String(string)).toString('base64');
 }
 
+// --- NEW: AUTOMATIC CSV LOGGER FUNCTION ---
+function logTradeToCSV(tradeData) {
+    // 1. Define Headers (Added SpotPrice and Strike)
+    const headers = "Date,StartTime,EndTime,Instrument,Signal,Strategy,SpotPrice,Strike,EntryPrice,ExitPrice,PnL,Reason\n";
+    
+    if (!fs.existsSync(LOG_FILE_PATH)) {
+        fs.writeFileSync(LOG_FILE_PATH, headers);
+    }
+
+    // 2. Format Data Row (Added SpotPrice and Strike)
+    const row = `${new Date().toLocaleDateString()},${tradeData.startTime},${tradeData.endTime},${tradeData.instrument},${tradeData.signal},${tradeData.strategy},${tradeData.spot},${tradeData.strike},${tradeData.buyPrice.toFixed(2)},${tradeData.exitPrice.toFixed(2)},${tradeData.pnl.toFixed(2)},${tradeData.reason}\n`;
+
+    // 3. Append to File
+    fs.appendFileSync(LOG_FILE_PATH, row);
+    console.log("📝 Trade Logged to CSV:", row.trim());
+}
+
 // ==================================================================
 // 3. UI DASHBOARD WEBSOCKET
 // ==================================================================
@@ -60,6 +85,11 @@ let uiClients = new Set();
 wss.on('connection', (ws) => {
     console.log('✅ UI Dashboard Connected');
     uiClients.add(ws);
+    
+    if(candleHistory.length > 0) {
+        ws.send(JSON.stringify({ type: 'HISTORY', data: candleHistory }));
+    }
+
     ws.send(JSON.stringify({ type: 'STATUS', message: 'Connected to Bot Server.' }));
     ws.on('close', () => { uiClients.delete(ws); });
 });
@@ -140,7 +170,12 @@ function chooseStrikeByDelta(chain, side, targetDelta, atmIndex) {
         const diff = Math.abs(Math.abs(g.delta) - Math.abs(targetDelta));
         if (diff < bestDiff) {
             bestDiff = diff; 
-            best = { strike: s.strike, greeks: g, price: (side === 'CE' ? s.CE_Ltp : s.PE_Ltp) };
+            best = { 
+                strike: s.strike, 
+                greeks: g, 
+                price: (side === 'CE' ? s.CE_Ltp : s.PE_Ltp),
+                symbol: (side === 'CE' ? s.CE_Symbol : s.PE_Symbol)
+            };
         }
     }
     return best; 
@@ -148,150 +183,87 @@ function chooseStrikeByDelta(chain, side, targetDelta, atmIndex) {
 
 function buildCandidate(chain, atmIndex, stratName) {
     const candidate = { name: stratName, legs: [], meta: {} };
-    
-    // --- 1. BULL CALL SPREAD ---
     if (stratName === 'Bull Call Spread') {
-        const buy = chooseStrikeByDelta(chain, 'CE', 0.5, atmIndex); // Buy ATM
-        const sell = chooseStrikeByDelta(chain, 'CE', 0.25, atmIndex); // Sell OTM
+        const buy = chooseStrikeByDelta(chain, 'CE', 0.5, atmIndex);
+        const sell = chooseStrikeByDelta(chain, 'CE', 0.25, atmIndex);
         if (!buy || !sell) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buy.strike, price: buy.price, greeks: buy.greeks });
-        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sell.strike, price: sell.price, greeks: sell.greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buy.strike, price: buy.price, greeks: buy.greeks, symbol: buy.symbol });
+        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sell.strike, price: sell.price, greeks: sell.greeks, symbol: sell.symbol });
         candidate.meta.description = `Buy ${buy.strike} CE, Sell ${sell.strike} CE`;
         return candidate;
     }
-
-    // --- 2. BEAR PUT SPREAD (Added) ---
     if (stratName === 'Bear Put Spread') {
-        const buy = chooseStrikeByDelta(chain, 'PE', 0.5, atmIndex); // Buy ATM Put (Delta -0.5)
-        const sell = chooseStrikeByDelta(chain, 'PE', 0.25, atmIndex); // Sell OTM Put (Delta -0.25)
+        const buy = chooseStrikeByDelta(chain, 'PE', 0.5, atmIndex); 
+        const sell = chooseStrikeByDelta(chain, 'PE', 0.25, atmIndex); 
         if (!buy || !sell) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buy.strike, price: buy.price, greeks: buy.greeks });
-        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sell.strike, price: sell.price, greeks: sell.greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buy.strike, price: buy.price, greeks: buy.greeks, symbol: buy.symbol });
+        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sell.strike, price: sell.price, greeks: sell.greeks, symbol: sell.symbol });
         candidate.meta.description = `Buy ${buy.strike} PE, Sell ${sell.strike} PE`;
         return candidate;
     }
-
-    // --- 3. IRON CONDOR (Added) ---
     if (stratName === 'Iron Condor') {
-        // Sell wings (Delta ~0.16)
         const sellCall = chooseStrikeByDelta(chain, 'CE', 0.16, atmIndex);
         const sellPut = chooseStrikeByDelta(chain, 'PE', 0.16, atmIndex);
-        
         if (!sellCall || !sellPut) return null;
-
-        // Buy protection (2 strikes further out)
-        // Note: In a real app, ensure indices don't go out of bounds
         const buyCallIdx = Math.min(chain.length - 1, (chain.findIndex(x => x.strike === sellCall.strike) + 2));
         const buyPutIdx = Math.max(0, (chain.findIndex(x => x.strike === sellPut.strike) - 2));
-        
         const buyCall = chain[buyCallIdx];
         const buyPut = chain[buyPutIdx];
-
         if (!buyCall || !buyPut) return null;
-
-        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sellCall.strike, price: sellCall.price, greeks: sellCall.greeks });
-        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sellPut.strike, price: sellPut.price, greeks: sellPut.greeks });
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buyCall.strike, price: buyCall.CE_Ltp, greeks: buyCall.CE_Greeks });
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buyPut.strike, price: buyPut.PE_Ltp, greeks: buyPut.PE_Greeks });
-        
+        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sellCall.strike, price: sellCall.price, greeks: sellCall.greeks, symbol: sellCall.symbol });
+        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sellPut.strike, price: sellPut.price, greeks: sellPut.greeks, symbol: sellPut.symbol });
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buyCall.strike, price: buyCall.CE_Ltp, greeks: buyCall.CE_Greeks, symbol: buyCall.CE_Symbol });
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buyPut.strike, price: buyPut.PE_Ltp, greeks: buyPut.PE_Greeks, symbol: buyPut.PE_Symbol });
         candidate.meta.description = `Iron Condor: Short ${sellCall.strike} CE / ${sellPut.strike} PE`;
         return candidate;
     }
-
-    // --- 4. LONG STRADDLE (Added for High VIX) ---
     if (stratName === 'Long Straddle') {
         const atm = chain[atmIndex];
         if (!atm) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: atm.strike, price: atm.CE_Ltp, greeks: atm.CE_Greeks });
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: atm.strike, price: atm.PE_Ltp, greeks: atm.PE_Greeks });
+        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: atm.strike, price: atm.CE_Ltp, greeks: atm.CE_Greeks, symbol: atm.CE_Symbol });
+        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: atm.strike, price: atm.PE_Ltp, greeks: atm.PE_Greeks, symbol: atm.PE_Symbol });
         candidate.meta.description = `Long Straddle @ ${atm.strike}`;
         return candidate;
     }
-    if (stratName === 'Calendar Spread') {
-        const atm = chain[atmIndex];
-        if (!atm) return null;
-
-        // NOTE: Real Calendar Spreads require fetching a second expiry chain.
-        // We SIMULATE the "Far Month" leg here by adding estimated Time Value (15%)
-        // so the strategy can be generated and tested immediately.
-        const nearPrice = atm.CE_Ltp;
-        const farPriceEst = nearPrice * 1.15; 
-
-        // Leg 1: Sell Near Month ATM Call
-        candidate.legs.push({ 
-            role: 'SELL', 
-            optionType: 'CE', 
-            strike: atm.strike, 
-            price: nearPrice, 
-            greeks: atm.CE_Greeks 
-        });
-
-        // Leg 2: Buy Far Month ATM Call (Simulated)
-        candidate.legs.push({ 
-            role: 'BUY', 
-            optionType: 'CE', 
-            strike: atm.strike, 
-            price: farPriceEst, 
-            // Far month options have lower Theta (decay slower), so we adjust the Greeks estimate
-            greeks: { ...atm.CE_Greeks, theta: (atm.CE_Greeks.theta || 0) * 0.6 } 
-        });
-
-        candidate.meta.description = `Calendar Spread: Short ${atm.strike} (Near) / Long ${atm.strike} (Far)`;
-        return candidate;
-    }
-
     return null;
 }
 
 function decideStrategy(signal, spot, daysToExpiry, optionChain, vix, config = {}) {
     let candidatesToTry = [];
-    
-    // Normalize logic based on PDF document
     const VIX_HIGH = 18; 
-// --- DAY BUCKET LOGIC ---
+    
     if (daysToExpiry >= 4) {
         if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
         else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
         else {
-            // NEUTRAL SIGNAL
-            if (vix > VIX_HIGH) candidatesToTry = ['Long Straddle']; // High Vol = Buy Volatility
-            else candidatesToTry = ['Calendar Spread', 'Iron Condor']; // Low Vol = Sell Near Term Decay
+            if (vix > VIX_HIGH) candidatesToTry = ['Long Straddle']; 
+            else candidatesToTry = ['Iron Condor'];
         }
     } else {
-        // Less than 4 days (Tighter spreads)
         if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
         else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
-        else candidatesToTry = ['Iron Condor']; // Calendar spreads risky very close to expiry
+        else candidatesToTry = ['Iron Condor'];
     }
 
     const strikesList = optionChain.map(c => c.strike);
     const atm = detectATMStrike(strikesList, spot);
     const atmIndex = strikesList.indexOf(atm);
-    
     if (atmIndex === -1) return { decision: 'SKIP', reason: 'ATM Strike not found' };
 
     const built = [];
-
     for (const sname of candidatesToTry) {
         const candidate = buildCandidate(optionChain, atmIndex, sname);
         if (!candidate) continue;
-        
-        // Simple scoring based on Risk/Reward (Mocked for now)
         let score = 50; 
-        if (sname.includes('Spread')) score += 20; // Prefer defined risk
-        if (sname.includes('Condor') && vix < 15) score += 30; // Good for low VIX
-        
+        if (sname.includes('Spread')) score += 20; 
+        if (sname.includes('Condor') && vix < 15) score += 30; 
         candidate.score = score;
         built.push(candidate);
     }
-
-    // Sort by score descending
     built.sort((a,b) => b.score - a.score);
-
     const chosen = built.length ? built[0] : null;
     if (chosen) return { decision: 'PLACE', strategy: chosen.name, legs: chosen.legs, meta: chosen.meta, score: chosen.score };
-    
-    return { decision: 'SKIP', reason: `No valid candidates found for ${signal.direction} in current market` };
+    return { decision: 'SKIP', reason: `No valid candidates found for ${signal.direction}` };
 }
 
 // ==================================================================
@@ -354,17 +326,17 @@ function startAlgoSystem() {
 
 function startWebSocketBrain() {
     console.log(`💡 ALGO BRAIN: Initializing WebSocket...`);
-    const skt = fyersDataSocket.getInstance(`${fyersAppId}:${fyersAccessToken}`, "."); 
-    skt.on("connect", () => {
+    fyersSocket = fyersDataSocket.getInstance(`${fyersAppId}:${fyersAccessToken}`, "."); 
+    fyersSocket.on("connect", () => {
         console.log("✅ Brain Connected");
-        skt.subscribe([algoState.symbol]);
-        skt.mode(skt.FullMode); 
+        fyersSocket.subscribe([algoState.symbol]);
+        fyersSocket.mode(fyersSocket.FullMode); 
     });
-    skt.on("message", (msg) => {
+    fyersSocket.on("message", (msg) => {
         if (msg.symbol === algoState.symbol && msg.ltp) processTick(msg.ltp, msg.exch_feed_time);
     });
-    skt.connect();
-    skt.autoreconnect(); 
+    fyersSocket.connect();
+    fyersSocket.autoreconnect(); 
 }
 
 function processTick(ltp, time) {
@@ -372,11 +344,14 @@ function processTick(ltp, time) {
     const minutes = Math.floor(date.getMinutes() / algoState.interval) * algoState.interval;
     date.setMinutes(minutes, 0, 0); 
     const candleTime = Math.floor(date.getTime() / 1000);
-    if (!currentCandle) currentCandle = { time: candleTime, open: ltp, high: ltp, low: ltp, close: ltp };
-    else if (candleTime === currentCandle.time) {
+    
+    if (!currentCandle) {
+        currentCandle = { time: candleTime, open: ltp, high: ltp, low: ltp, close: ltp };
+    } else if (candleTime === currentCandle.time) {
         currentCandle.high = Math.max(currentCandle.high, ltp);
         currentCandle.low = Math.min(currentCandle.low, ltp);
         currentCandle.close = ltp;
+        broadcast({ type: 'TICK', candle: currentCandle });
     } else {
         broadcast({ type: 'CANDLE', message: `Candle Closed @ ${currentCandle.close}`, candle: currentCandle });
         candleHistory.push(currentCandle);
@@ -395,29 +370,52 @@ async function runSignalLogic() {
     const prevSma7 = prevCloses.slice(-7).reduce((a, b) => a + b, 0) / 7;
     const prevSma25 = prevCloses.slice(-26, -1).reduce((a, b) => a + b, 0) / 25;
     broadcast({ type: 'STATUS', message: `SMA7: ${sma7.toFixed(2)} | SMA25: ${sma25.toFixed(2)}` });
-    if (sma7 > sma25 && prevSma7 < prevSma25) {
-        algoState.isInTrade = true;
-        try { await placeLiveOrder(algoState.symbol, algoState.qty, 1); } catch (e) { algoState.isInTrade = false; }
-    }
 }
 
+// Phase 4: Updated Algo Manager for 20% SL and 10% TP
+// UPDATED: Now logs to CSV on exit
 function startAlgoManager() {
     setInterval(async () => {
         if (!fyersAccessToken || livePositions.length === 0) return;
         try {
             const pos = livePositions[0]; 
-            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: pos.symbol }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
+            const quoteSymbol = pos.instrument || pos.symbol; 
+            
+            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: quoteSymbol }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
             const ltp = quotesRes.data.d?.[0]?.v?.lp;
             if (!ltp) return; 
+            
             const pnl = (ltp - pos.buyPrice) * pos.qty;
-            broadcast({ type: 'PNL_UPDATE', pnl: pnl, ltp: ltp, trade: pos });
-            if (ltp >= pos.target || ltp <= pos.stopLoss) {
-                await placeLiveOrder(pos.symbol, pos.qty, -1);
-                livePositions = []; algoState.isInTrade = false; 
-                broadcast({ type: 'TRADE_CLOSE', message: "Trade Closed" });
+            const pnlPercent = ((ltp - pos.buyPrice) / pos.buyPrice) * 100;
+            
+            broadcast({ type: 'PNL_UPDATE', pnl: pnl, ltp: ltp, trade: pos, pnlPercent: pnlPercent });
+            
+            let exitReason = null;
+            if (ltp >= (pos.buyPrice * 1.10)) {
+                exitReason = "TARGET (10%)";
+            } else if (ltp <= (pos.buyPrice * 0.80)) {
+                exitReason = "STOP LOSS (20%)";
             }
-        } catch (e) { }
-    }, 3000); 
+
+            if (exitReason) {
+                console.log(`[SIMULATION] Trade Closed: ${exitReason}`);
+                
+                // --- AUTO LOGGING TO CSV ---
+                const tradeRecord = {
+                    ...pos,
+                    endTime: new Date().toLocaleTimeString(),
+                    exitPrice: ltp,
+                    pnl: pnl,
+                    reason: exitReason
+                };
+                logTradeToCSV(tradeRecord);
+                // ---------------------------
+
+                livePositions = []; algoState.isInTrade = false; 
+                broadcast({ type: 'TRADE_CLOSE', message: `Trade Closed: ${exitReason}` });
+            }
+        } catch (e) { console.error("Manager Error", e.message); }
+    }, 2000); 
 }
 
 async function placeLiveOrder(symbol, qty, side, isAMO = false) {
@@ -426,30 +424,59 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     fyers.setAccessToken(fyersAccessToken);
     let payload = { symbol, qty, type: 2, side, productType: "INTRADAY", validity: "DAY" };
     if (isAMO) { payload.type = 1; payload.limitPrice = 100; payload.productType = "CNC"; payload.offlineOrder = true; }
+    console.log(`🚀 PLACING ORDER: ${side===1?'BUY':'SELL'} ${qty} ${symbol}`);
     return await fyers.place_order(payload);
 }
 
+// Phase 4: Updated to handle NSE Stocks, SENSEX, and Monthly Expiry
 async function fetchMarketDataWithGreeks(symbol) {
     let inputSymbol = symbol.toUpperCase();
     let underlyingSymbolFyers = '';
     let userFriendlyKey = '';
+
     if (inputSymbol === 'NIFTY') { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; }
     else if (inputSymbol === 'BANKNIFTY') { underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX'; userFriendlyKey = 'BANKNIFTY'; }
-    else if (inputSymbol.includes(':')) { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol.split(':')[1].replace('-INDEX', ''); }
-    else { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; } 
+    else if (inputSymbol === 'FINNIFTY') { underlyingSymbolFyers = 'NSE:FINNIFTY-INDEX'; userFriendlyKey = 'FINNIFTY'; }
+    else if (inputSymbol === 'MIDCPNIFTY') { underlyingSymbolFyers = 'NSE:MIDCPNIFTY-INDEX'; userFriendlyKey = 'MIDCPNIFTY'; }
+    else if (inputSymbol === 'SENSEX' || inputSymbol.includes('SENSEX')) { underlyingSymbolFyers = 'BSE:SENSEX-INDEX'; userFriendlyKey = 'SENSEX'; }
+    else if (inputSymbol.includes('NSE:') && inputSymbol.includes('-EQ')) {
+        underlyingSymbolFyers = inputSymbol; 
+        userFriendlyKey = inputSymbol.split(':')[1].replace('-EQ', '');
+    }
+    else { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol; } 
 
-    // Fetch Spot
-    const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: underlyingSymbolFyers }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
-    const spotPrice = quotesRes.data?.d?.[0]?.v?.lp || 0;
+    if (fyersSocket && algoState.symbol !== underlyingSymbolFyers) {
+        console.log(`🔄 Switching Feed: ${algoState.symbol} -> ${underlyingSymbolFyers}`);
+        fyersSocket.unsubscribe([algoState.symbol]);
+        fyersSocket.subscribe([underlyingSymbolFyers]);
+        algoState.symbol = underlyingSymbolFyers;
+        candleHistory = [];
+        currentCandle = null;
+        broadcast({ type: 'HISTORY', data: [] });
+    }
 
-    // Fetch Chain
+    const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
+        params: { symbols: `${underlyingSymbolFyers},NSE:INDIAVIX-INDEX` }, 
+        headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
+    });
+    
+    const spotData = quotesRes.data.d.find(q => q.n === underlyingSymbolFyers);
+    const vixData = quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX');
+    
+    const spotPrice = spotData?.v?.lp || 0;
+    const indiaVix = vixData?.v?.lp || 14.5; 
+
+    let effectiveVix = indiaVix;
+    if (['NSE:ADANIENT-EQ', 'NSE:ADANIGREEN-EQ', 'NSE:TATAMOTORS-EQ'].includes(underlyingSymbolFyers)) {
+         effectiveVix = 22.5; 
+    }
+
     const fyers = new fyersModel();
     fyers.setAppId(fyersAppId);
     fyers.setAccessToken(fyersAccessToken);
-    const chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 60, timestamp: "" });
+    const chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 30, timestamp: "" });
     if (!chainRes.data?.optionsChain) throw new Error("Option chain fetch failed");
 
-    // Calc Days
     let daysToExpiry = 7; 
     try {
         const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
@@ -460,8 +487,6 @@ async function fetchMarketDataWithGreeks(symbol) {
         }
     } catch (e) { }
 
-    // Calc Greeks
-    const mockVix = 14.5;
     const strikeMap = new Map();
     chainRes.data.optionsChain.forEach(opt => {
         if (!strikeMap.has(opt.strike_price)) {
@@ -470,10 +495,12 @@ async function fetchMarketDataWithGreeks(symbol) {
         const item = strikeMap.get(opt.strike_price);
         if (opt.option_type === 'CE') {
             item.CE_Ltp = opt.ltp;
-            item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', mockVix);
+            item.CE_Symbol = opt.symbol; 
+            item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', effectiveVix);
         } else if (opt.option_type === 'PE') {
             item.PE_Ltp = opt.ltp;
-            item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', mockVix);
+            item.PE_Symbol = opt.symbol; 
+            item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', effectiveVix);
         }
     });
 
@@ -481,7 +508,7 @@ async function fetchMarketDataWithGreeks(symbol) {
         symbol: userFriendlyKey,
         fyersSymbol: underlyingSymbolFyers,
         spot: spotPrice,
-        vix: mockVix,
+        vix: effectiveVix, 
         daysToExpiry: daysToExpiry,
         options: Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike)
     };
@@ -502,7 +529,7 @@ app.get('/api/live-data-with-greeks/:symbol', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     try {
         const data = await fetchMarketDataWithGreeks(req.params.symbol);
-        liveDataCache[data.symbol] = { timestamp: Date.now(), data: data }; // Populate Cache
+        liveDataCache[data.symbol] = { timestamp: Date.now(), data: data }; 
         res.json(data);
     } catch (error) { res.status(500).json({ error: "Failed to fetch data", details: error.message }); }
 });
@@ -511,10 +538,65 @@ app.post('/api/decide-and-build-order', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     try {
         const { signal, symbol } = req.body;
+        // Auto-switch handled in fetchMarketDataWithGreeks now
         const marketData = await fetchMarketDataWithGreeks(symbol);
         const decision = decideStrategy(signal, marketData.spot, marketData.daysToExpiry, marketData.options, marketData.vix);
+        // Include Signal and Spot Price for logging purposes
+        decision.signal = signal.direction; 
+        decision.spot = marketData.spot; // Capture Spot Price for CSV
         res.json(decision);
     } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
+});
+
+// Phase 4: NEW - One Click Auto Execution (SIMULATION MODE FOR NO FUNDS)
+// UPDATED: Saves extra metadata for Logging
+app.post('/api/execute-trade', async (req, res) => {
+    if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
+    
+    try {
+        const { strategy, decisionData } = req.body;
+        
+        if (!decisionData || !decisionData.legs || decisionData.legs.length === 0) {
+            return res.status(400).json({ error: "Invalid trade data" });
+        }
+
+        const leg = decisionData.legs[0]; 
+        
+        let actualSymbol = leg.symbol;
+        if (!actualSymbol) {
+             const marketData = await fetchMarketDataWithGreeks(algoState.symbol);
+             const opt = marketData.options.find(o => o.strike === leg.strike);
+             actualSymbol = leg.optionType === 'CE' ? opt.CE_Symbol : opt.PE_Symbol;
+        }
+
+        // --- SIMULATION MODE START ---
+        console.log(`[SIMULATION] Virtual Order Placed: BUY 1 ${actualSymbol} @ ~${leg.price}`);
+        
+        const entryPrice = leg.price || 100; 
+        
+        // Populate extra data for the CSV Log
+        const newPosition = {
+            instrument: actualSymbol,
+            buyPrice: entryPrice,
+            qty: 1, 
+            stopLossPrice: entryPrice * 0.80, 
+            targetPrice: entryPrice * 1.10,
+            startTime: new Date().toLocaleTimeString(),
+            signal: decisionData.signal || 'MANUAL',
+            strategy: strategy,
+            spot: decisionData.spot, // Save Spot Price
+            strike: leg.strike       // Save Strike Price
+        };
+
+        livePositions = [newPosition]; 
+        algoState.isInTrade = true;
+
+        res.json({ success: true, message: "Simulation Auto-Trade Executed", position: newPosition });
+        // --- SIMULATION MODE END ---
+
+    } catch (error) {
+        res.status(500).json({ error: "Execution Failed", details: error.message });
+    }
 });
 
 app.post('/calculate', (req, res) => {
@@ -532,8 +614,15 @@ app.post('/calculate', (req, res) => {
         const params = { ...req.body, spotPrices };
         
         if (!params.lotSize) {
-             const key = Object.keys(SYMBOL_LOT_SIZES).find(k => k === symbol?.toUpperCase());
-             params.lotSize = key ? SYMBOL_LOT_SIZES[key] : 1;
+             let key = symbol?.toUpperCase();
+             if (key) {
+                 if (key.includes('SENSEX')) key = 'SENSEX';
+                 else if (key.includes('BANKNIFTY')) key = 'BANKNIFTY';
+                 else if (key.includes('FINNIFTY')) key = 'FINNIFTY';
+                 else if (key.includes('MIDCPNIFTY')) key = 'MIDCPNIFTY';
+                 else if (key.includes('NIFTY')) key = 'NIFTY';
+             }
+             params.lotSize = (key && SYMBOL_LOT_SIZES[key]) ? SYMBOL_LOT_SIZES[key] : 1;
         }
         const result = calculateStrategy(strategy, params);
         if (Array.isArray(result.breakeven)) result.breakeven = result.breakeven.map(n => n.toFixed(2)).join(' & ');
