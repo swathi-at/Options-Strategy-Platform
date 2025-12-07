@@ -7,12 +7,11 @@ const cors = require('cors');
 const axios = require('axios');
 const otpauth = require('otpauth');
 const crypto = require('crypto');
-const fs = require('fs'); // NEW: File System for Logging
-const path = require('path'); // NEW: Path handling
-// CRITICAL IMPORT: This line defines fyersModel. Do not remove.
+const fs = require('fs'); 
+const path = require('path'); 
+const readline = require('readline'); // NEW: Required for CSV parsing
 const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
 const { calculateStrategy } = require('./strategyengine'); 
-const { SYMBOL_LOT_SIZES } = require('./constants'); 
 const { WebSocketServer } = require('ws');
 
 const app = express();
@@ -24,7 +23,7 @@ app.use(express.json());
 // ==================================================================
 const liveDataCache = {}; 
 const CACHE_DURATION_MS = 20 * 1000; 
-const LOG_FILE_PATH = path.join(__dirname, 'trade_logs.csv'); // Log File
+const LOG_FILE_PATH = path.join(__dirname, 'trade_logs.csv');
 
 const FYERS_APP_ID = process.env.FYERS_CLIENT_ID;
 const FYERS_SECRET_KEY = process.env.FYERS_SECRET_KEY;
@@ -35,6 +34,18 @@ const FYERS_REDIRECT_URI = process.env.FYERS_REDIRECT_URI || 'https://www.google
 const FYERS_API_BASE_URL_V2 = 'https://api-t2.fyers.in/vagator/v2';
 const FYERS_API_DATA_URL_V3 = 'https://api-t1.fyers.in/data';
 
+// Global Storage for Lot Sizes
+const DYNAMIC_LOT_SIZES = {};
+
+// Default Fallbacks (Just in case CSV fetch fails)
+const FALLBACK_LOT_SIZES = {
+    'NIFTY': 75,
+    'BANKNIFTY': 15,     
+    'FINNIFTY': 25,
+    'MIDCPNIFTY': 50,
+    'SENSEX': 10
+};
+
 let fyersAccessToken = null;
 let fyersAppId = null; 
 let isAlgoRunning = false;
@@ -43,10 +54,8 @@ let candleHistory = [];
 let currentCandle = null;
 let algoState = { symbol: "NSE:NIFTY50-INDEX", interval: 1, qty: 1, isInTrade: false };
 
-// Global Socket Instance
 let fyersSocket = null; 
 
-// Initialize Login Instance
 const fyersLoginInstance = new fyersModel();
 if (FYERS_APP_ID) {
     fyersLoginInstance.setAppId(FYERS_APP_ID);
@@ -59,25 +68,105 @@ function getEncodedString(string) {
     return Buffer.from(String(string)).toString('base64');
 }
 
-// --- NEW: AUTOMATIC CSV LOGGER FUNCTION ---
 function logTradeToCSV(tradeData) {
-    // 1. Define Headers (Added SpotPrice and Strike)
     const headers = "Date,StartTime,EndTime,Instrument,Signal,Strategy,SpotPrice,Strike,EntryPrice,ExitPrice,PnL,Reason\n";
-    
     if (!fs.existsSync(LOG_FILE_PATH)) {
         fs.writeFileSync(LOG_FILE_PATH, headers);
     }
-
-    // 2. Format Data Row (Added SpotPrice and Strike)
     const row = `${new Date().toLocaleDateString()},${tradeData.startTime},${tradeData.endTime},${tradeData.instrument},${tradeData.signal},${tradeData.strategy},${tradeData.spot},${tradeData.strike},${tradeData.buyPrice.toFixed(2)},${tradeData.exitPrice.toFixed(2)},${tradeData.pnl.toFixed(2)},${tradeData.reason}\n`;
-
-    // 3. Append to File
     fs.appendFileSync(LOG_FILE_PATH, row);
     console.log("📝 Trade Logged to CSV:", row.trim());
 }
 
 // ==================================================================
-// 3. UI DASHBOARD WEBSOCKET
+// 3. LOT SIZE HELPERS (NEW SECTION)
+// ==================================================================
+
+// --- LIVE LOT SIZE FETCHER ---
+async function fetchLiveLotSizes() {
+    console.log("📥 Fetching Live Lot Sizes from Fyers Master CSV...");
+    try {
+        const response = await axios({
+            method: 'get',
+            url: 'https://public.fyers.in/sym_details/NSE_FO.csv',
+            responseType: 'stream'
+        });
+
+        const rl = readline.createInterface({
+            input: response.data,
+            crlfDelay: Infinity
+        });
+
+        let count = 0;
+        for await (const line of rl) {
+            const cols = line.split(',');
+            // CSV Structure usually: ..., LotSize(col 3), ..., Symbol(col 9), ...
+            // Adjust indices based on actual CSV format check if needed. 
+            // Based on standard Fyers CSV: Column 3 is LotSize, Column 13 is Symbol details, or Column 9 is Symbol.
+            // Let's stick to your provided logic which worked for you:
+            if (cols.length > 9) {
+                const symbolCode = cols[9]; // Symbol
+                const lotSize = parseInt(cols[3]); // Lot Size
+
+                if (symbolCode && !isNaN(lotSize)) {
+                    let rootSymbol = "";
+                    if (symbolCode.includes('NIFTY') && !symbolCode.includes('BANK') && !symbolCode.includes('FIN') && !symbolCode.includes('MID')) rootSymbol = 'NIFTY';
+                    else if (symbolCode.includes('BANKNIFTY')) rootSymbol = 'BANKNIFTY';
+                    else if (symbolCode.includes('FINNIFTY')) rootSymbol = 'FINNIFTY';
+                    else if (symbolCode.includes('MIDCPNIFTY')) rootSymbol = 'MIDCPNIFTY';
+                    else {
+                        // Extract Stock Name for equities e.g., "NSE:SBIN-EQ" or "NSE:SBIN24OCT..."
+                        const match = symbolCode.match(/NSE:([A-Z]+)/);
+                        if (match) rootSymbol = match[1];
+                    }
+
+                    if (rootSymbol && lotSize > 0) {
+                        // Only set if not already set or overwrite (usually all expiries have same lot size)
+                        if (!DYNAMIC_LOT_SIZES[rootSymbol]) {
+                            DYNAMIC_LOT_SIZES[rootSymbol] = lotSize;
+                            count++;
+                        }
+                    }
+                }
+            }
+        }
+        DYNAMIC_LOT_SIZES['SENSEX'] = 10; 
+        DYNAMIC_LOT_SIZES['BANKEX'] = 15;
+        console.log(`✅ Live Lot Sizes Loaded for ${Object.keys(DYNAMIC_LOT_SIZES).length} symbols.`);
+        // console.log("Sample:", DYNAMIC_LOT_SIZES['NIFTY'], DYNAMIC_LOT_SIZES['BANKNIFTY'], DYNAMIC_LOT_SIZES['SBIN']);
+    } catch (error) {
+        console.error("❌ Failed to fetch Live Lot Sizes:", error.message);
+    }
+}
+
+function getLotSizeForSymbol(symbol) {
+    if (!symbol) return 1;
+    let key = symbol.toUpperCase();
+    
+    // Clean up symbol to get the "Root" name (e.g., NSE:SBIN-EQ -> SBIN)
+    if (key.includes('NSE:') && key.includes('-EQ')) key = key.split(':')[1].replace('-EQ', '');
+    else if (key.includes('NSE:')) key = key.replace('NSE:', '').split('-')[0];
+    
+    if (key.includes('SENSEX')) key = 'SENSEX';
+    if (key === 'NIFTY 50' || (key.includes('NIFTY') && !key.includes('BANK') && !key.includes('FIN') && !key.includes('MID'))) key = 'NIFTY';
+    if (key.includes('BANKNIFTY')) key = 'BANKNIFTY';
+    if (key.includes('FINNIFTY')) key = 'FINNIFTY';
+    if (key.includes('MIDCPNIFTY')) key = 'MIDCPNIFTY';
+
+    // 1. Try Dynamic Map
+    if (DYNAMIC_LOT_SIZES[key]) return DYNAMIC_LOT_SIZES[key];
+    
+    // 2. Try Hardcoded Fallback
+    if (FALLBACK_LOT_SIZES[key]) return FALLBACK_LOT_SIZES[key];
+
+    return 1; // Default
+}
+
+// CALL THIS ON SERVER START
+fetchLiveLotSizes();
+
+// ==================================================================
+// 4. UI DASHBOARD WEBSOCKET
 // ==================================================================
 const wss = new WebSocketServer({ port: 8080 });
 let uiClients = new Set(); 
@@ -85,11 +174,9 @@ let uiClients = new Set();
 wss.on('connection', (ws) => {
     console.log('✅ UI Dashboard Connected');
     uiClients.add(ws);
-    
     if(candleHistory.length > 0) {
         ws.send(JSON.stringify({ type: 'HISTORY', data: candleHistory }));
     }
-
     ws.send(JSON.stringify({ type: 'STATUS', message: 'Connected to Bot Server.' }));
     ws.on('close', () => { uiClients.delete(ws); });
 });
@@ -102,7 +189,7 @@ function broadcast(data) {
 console.log('UI Dashboard WebSocket Server started on port 8080.');
 
 // ==================================================================
-// 4. LOGIC: GREEKS CALCULATOR (Embedded)
+// 5. LOGIC: GREEKS CALCULATOR
 // ==================================================================
 function normalcdf(X) {
     if (typeof X !== 'number' || isNaN(X)) return 0;
@@ -152,7 +239,7 @@ function estimateGreeks(spot, strike, daysToExpiry, premium, type, vix) {
 }
 
 // ==================================================================
-// 5. LOGIC: STRATEGY DEPLOYER (Embedded)
+// 6. LOGIC: STRATEGY DEPLOYER
 // ==================================================================
 function detectATMStrike(strikes, spot) {
     return strikes.reduce((prev, curr) => Math.abs(curr - spot) < Math.abs(prev - spot) ? curr : prev);
@@ -267,7 +354,7 @@ function decideStrategy(signal, spot, daysToExpiry, optionChain, vix, config = {
 }
 
 // ==================================================================
-// 6. AUTH ROUTES
+// 7. AUTH ROUTES
 // ==================================================================
 app.post('/api/fyers/login', async (req, res) => {
     try {
@@ -314,7 +401,7 @@ app.post('/api/fyers/login', async (req, res) => {
 });
 
 // ==================================================================
-// 7. ALGO & DATA HELPERS
+// 8. ALGO & DATA HELPERS
 // ==================================================================
 function startAlgoSystem() {
     if (isAlgoRunning) return;
@@ -372,8 +459,6 @@ async function runSignalLogic() {
     broadcast({ type: 'STATUS', message: `SMA7: ${sma7.toFixed(2)} | SMA25: ${sma25.toFixed(2)}` });
 }
 
-// Phase 4: Updated Algo Manager for 20% SL and 10% TP
-// UPDATED: Now logs to CSV on exit
 function startAlgoManager() {
     setInterval(async () => {
         if (!fyersAccessToken || livePositions.length === 0) return;
@@ -400,7 +485,6 @@ function startAlgoManager() {
             if (exitReason) {
                 console.log(`[SIMULATION] Trade Closed: ${exitReason}`);
                 
-                // --- AUTO LOGGING TO CSV ---
                 const tradeRecord = {
                     ...pos,
                     endTime: new Date().toLocaleTimeString(),
@@ -409,8 +493,7 @@ function startAlgoManager() {
                     reason: exitReason
                 };
                 logTradeToCSV(tradeRecord);
-                // ---------------------------
-
+                
                 livePositions = []; algoState.isInTrade = false; 
                 broadcast({ type: 'TRADE_CLOSE', message: `Trade Closed: ${exitReason}` });
             }
@@ -428,22 +511,28 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     return await fyers.place_order(payload);
 }
 
-// Phase 4: Updated to handle NSE Stocks, SENSEX, and Monthly Expiry
+// Replaced fetchStockLotSize with the generic getLotSizeForSymbol
 async function fetchMarketDataWithGreeks(symbol) {
     let inputSymbol = symbol.toUpperCase();
     let underlyingSymbolFyers = '';
     let userFriendlyKey = '';
+    let isIndex = false;
 
-    if (inputSymbol === 'NIFTY') { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; }
-    else if (inputSymbol === 'BANKNIFTY') { underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX'; userFriendlyKey = 'BANKNIFTY'; }
-    else if (inputSymbol === 'FINNIFTY') { underlyingSymbolFyers = 'NSE:FINNIFTY-INDEX'; userFriendlyKey = 'FINNIFTY'; }
-    else if (inputSymbol === 'MIDCPNIFTY') { underlyingSymbolFyers = 'NSE:MIDCPNIFTY-INDEX'; userFriendlyKey = 'MIDCPNIFTY'; }
-    else if (inputSymbol === 'SENSEX' || inputSymbol.includes('SENSEX')) { underlyingSymbolFyers = 'BSE:SENSEX-INDEX'; userFriendlyKey = 'SENSEX'; }
+    if (inputSymbol === 'NIFTY') { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; isIndex = true; }
+    else if (inputSymbol === 'BANKNIFTY') { underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX'; userFriendlyKey = 'BANKNIFTY'; isIndex = true; }
+    else if (inputSymbol === 'FINNIFTY') { underlyingSymbolFyers = 'NSE:FINNIFTY-INDEX'; userFriendlyKey = 'FINNIFTY'; isIndex = true; }
+    else if (inputSymbol === 'MIDCPNIFTY') { underlyingSymbolFyers = 'NSE:MIDCPNIFTY-INDEX'; userFriendlyKey = 'MIDCPNIFTY'; isIndex = true; }
+    else if (inputSymbol === 'SENSEX' || inputSymbol.includes('SENSEX')) { underlyingSymbolFyers = 'BSE:SENSEX-INDEX'; userFriendlyKey = 'SENSEX'; isIndex = true; }
     else if (inputSymbol.includes('NSE:') && inputSymbol.includes('-EQ')) {
         underlyingSymbolFyers = inputSymbol; 
         userFriendlyKey = inputSymbol.split(':')[1].replace('-EQ', '');
+        isIndex = false; 
     }
-    else { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol; } 
+    else { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol; isIndex = false; } 
+
+    // --- GET LOT SIZE FROM DYNAMIC MAP ---
+    let lotSize = getLotSizeForSymbol(userFriendlyKey || underlyingSymbolFyers);
+    // -------------------------------------
 
     if (fyersSocket && algoState.symbol !== underlyingSymbolFyers) {
         console.log(`🔄 Switching Feed: ${algoState.symbol} -> ${underlyingSymbolFyers}`);
@@ -468,41 +557,69 @@ async function fetchMarketDataWithGreeks(symbol) {
 
     let effectiveVix = indiaVix;
     if (['NSE:ADANIENT-EQ', 'NSE:ADANIGREEN-EQ', 'NSE:TATAMOTORS-EQ'].includes(underlyingSymbolFyers)) {
-         effectiveVix = 22.5; 
+            effectiveVix = 22.5; 
     }
 
     const fyers = new fyersModel();
     fyers.setAppId(fyersAppId);
     fyers.setAccessToken(fyersAccessToken);
-    const chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 30, timestamp: "" });
-    if (!chainRes.data?.optionsChain) throw new Error("Option chain fetch failed");
+    
+    if (!isIndex) {
+        return {
+            symbol: userFriendlyKey,
+            fyersSymbol: underlyingSymbolFyers,
+            spot: spotPrice,
+            vix: effectiveVix, 
+            daysToExpiry: 0, 
+            options: [],
+            lotSize: lotSize 
+        };
+    }
 
-    let daysToExpiry = 7; 
+    // --- INDEX LOGIC ---
+    let chainRes;
     try {
-        const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
-        if (expiryEpoch) {
-            const diffTime = (new Date(expiryEpoch * 1000).getTime()) - (new Date().getTime());
-            daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            if (daysToExpiry <= 0) daysToExpiry = 0.001; 
-        }
-    } catch (e) { }
-
+        chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 30, timestamp: "" });
+    } catch (error) {
+        console.error("Option Chain API Request Error:", error.message);
+    }
+    
+    let daysToExpiry = 7; 
     const strikeMap = new Map();
-    chainRes.data.optionsChain.forEach(opt => {
-        if (!strikeMap.has(opt.strike_price)) {
-            strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE_Ltp: 0, PE_Ltp: 0, CE_Greeks: {}, PE_Greeks: {} });
+    
+    try {
+        if (!chainRes || !chainRes.data || !chainRes.data.optionsChain) {
+            console.error("❌ Option chain failed or was empty.");
+        } else {
+            // Days to Expiry Calculation
+            const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
+            if (expiryEpoch) {
+                const diffTime = (new Date(expiryEpoch * 1000).getTime()) - (new Date().getTime());
+                daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                if (daysToExpiry <= 0) daysToExpiry = 0.001; 
+            }
+
+            // Option Chain Greeks Population
+            chainRes.data.optionsChain.forEach(opt => {
+                if (!strikeMap.has(opt.strike_price)) {
+                    strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE_Ltp: 0, PE_Ltp: 0, CE_Greeks: {}, PE_Greeks: {} });
+                }
+                const item = strikeMap.get(opt.strike_price);
+                if (opt.option_type === 'CE') {
+                    item.CE_Ltp = opt.ltp;
+                    item.CE_Symbol = opt.symbol; 
+                    item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', effectiveVix);
+                } else if (opt.option_type === 'PE') {
+                    item.PE_Ltp = opt.ltp;
+                    item.PE_Symbol = opt.symbol; 
+                    item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', effectiveVix);
+                }
+            });
         }
-        const item = strikeMap.get(opt.strike_price);
-        if (opt.option_type === 'CE') {
-            item.CE_Ltp = opt.ltp;
-            item.CE_Symbol = opt.symbol; 
-            item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', effectiveVix);
-        } else if (opt.option_type === 'PE') {
-            item.PE_Ltp = opt.ltp;
-            item.PE_Symbol = opt.symbol; 
-            item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', effectiveVix);
-        }
-    });
+
+    } catch (e) { 
+        console.error("Option Chain Processing Error:", e.message);
+    }
 
     return {
         symbol: userFriendlyKey,
@@ -510,12 +627,13 @@ async function fetchMarketDataWithGreeks(symbol) {
         spot: spotPrice,
         vix: effectiveVix, 
         daysToExpiry: daysToExpiry,
-        options: Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike)
+        options: Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike),
+        lotSize: lotSize 
     };
 }
 
 // ==================================================================
-// 8. API ROUTES
+// 9. API ROUTES
 // ==================================================================
 app.get('/api/live-data/:symbol', async (req, res) => {
     try {
@@ -538,18 +656,14 @@ app.post('/api/decide-and-build-order', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     try {
         const { signal, symbol } = req.body;
-        // Auto-switch handled in fetchMarketDataWithGreeks now
         const marketData = await fetchMarketDataWithGreeks(symbol);
         const decision = decideStrategy(signal, marketData.spot, marketData.daysToExpiry, marketData.options, marketData.vix);
-        // Include Signal and Spot Price for logging purposes
         decision.signal = signal.direction; 
-        decision.spot = marketData.spot; // Capture Spot Price for CSV
+        decision.spot = marketData.spot; 
         res.json(decision);
     } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
 });
 
-// Phase 4: NEW - One Click Auto Execution (SIMULATION MODE FOR NO FUNDS)
-// UPDATED: Saves extra metadata for Logging
 app.post('/api/execute-trade', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     
@@ -574,7 +688,6 @@ app.post('/api/execute-trade', async (req, res) => {
         
         const entryPrice = leg.price || 100; 
         
-        // Populate extra data for the CSV Log
         const newPosition = {
             instrument: actualSymbol,
             buyPrice: entryPrice,
@@ -584,8 +697,8 @@ app.post('/api/execute-trade', async (req, res) => {
             startTime: new Date().toLocaleTimeString(),
             signal: decisionData.signal || 'MANUAL',
             strategy: strategy,
-            spot: decisionData.spot, // Save Spot Price
-            strike: leg.strike       // Save Strike Price
+            spot: decisionData.spot, 
+            strike: leg.strike        
         };
 
         livePositions = [newPosition]; 
@@ -599,39 +712,65 @@ app.post('/api/execute-trade', async (req, res) => {
     }
 });
 
-app.post('/calculate', (req, res) => {
+app.post('/calculate', async (req, res) => {
     try {
-        const { strategy, strike, strike1, strike2, stockPrice, symbol } = req.body;
+        const { strategy, strike, strike1, strike2, stockPrice, symbol, lotSize } = req.body;
+        
         const s = Number(strike) || 0;
         const s1 = Number(strike1) || 0;
         const s2 = Number(strike2) || 0;
         const sp = Number(stockPrice) || 0;
         const referenceStrike = s || s1 || s2 || sp;
+        
         if (!referenceStrike) return res.status(400).json({ error: 'Valid strike required.' });
 
         const spotPrices = [];
-        for (let i = referenceStrike * 0.85; i <= referenceStrike * 1.15; i += referenceStrike*0.01) spotPrices.push(Math.round(i));
+        for (let i = referenceStrike * 0.85; i <= referenceStrike * 1.15; i += referenceStrike * 0.01) {
+            spotPrices.push(Math.round(i));
+        }
+        
         const params = { ...req.body, spotPrices };
         
-        if (!params.lotSize) {
-             let key = symbol?.toUpperCase();
-             if (key) {
-                 if (key.includes('SENSEX')) key = 'SENSEX';
-                 else if (key.includes('BANKNIFTY')) key = 'BANKNIFTY';
-                 else if (key.includes('FINNIFTY')) key = 'FINNIFTY';
-                 else if (key.includes('MIDCPNIFTY')) key = 'MIDCPNIFTY';
-                 else if (key.includes('NIFTY')) key = 'NIFTY';
-             }
-             params.lotSize = (key && SYMBOL_LOT_SIZES[key]) ? SYMBOL_LOT_SIZES[key] : 1;
+        // --- DYNAMIC LOT SIZE LOGIC (VIA CSV OR FALLBACK) ---
+        if (symbol && (!lotSize || Number(lotSize) === 1)) {
+            // Check global map first (Populated by CSV)
+            const liveSize = getLotSizeForSymbol(symbol);
+            if (liveSize && liveSize > 1) {
+                params.lotSize = liveSize;
+                console.log(`✅ Using Global/CSV Lot Size for ${symbol}: ${liveSize}`);
+            } else {
+                console.log(`⚠️ No CSV data. Checking fallback...`);
+                // Check fallback map
+                if (FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[symbol.replace('NSE:', '')]) {
+                     params.lotSize = FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[symbol.replace('NSE:', '')];
+                     console.log(`✅ Applied Fallback from Route: ${params.lotSize}`);
+                } else {
+                     params.lotSize = 1;
+                }
+            }
+        } else if (!params.lotSize) {
+             params.lotSize = 1; 
         }
+        // --- END DYNAMIC LOT SIZE LOGIC ---
+
         const result = calculateStrategy(strategy, params);
-        if (Array.isArray(result.breakeven)) result.breakeven = result.breakeven.map(n => n.toFixed(2)).join(' & ');
-        else if (typeof result.breakeven === 'number') result.breakeven = result.breakeven.toFixed(2);
+        
+        if (Array.isArray(result.breakeven)) {
+            result.breakeven = result.breakeven.map(n => n.toFixed(2)).join(' & ');
+        } else if (typeof result.breakeven === 'number') {
+            result.breakeven = result.breakeven.toFixed(2);
+        }
+        
+        result.usedLotSize = params.lotSize; 
+        
         res.json(result);
-    } catch (error) { res.status(400).json({ error: error.message }); }
+
+    } catch (error) { 
+        console.error("Calculation Error:", error.message);
+        res.status(400).json({ error: error.message }); 
+    }
 });
 
-// PAPER TRADING
 const paperTrades = [];
 function findCurrentPrice(symbol, strike, optionType) {
     try {

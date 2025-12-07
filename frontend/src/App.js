@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import TradePanel from "./components/TradePanel"; 
-// UPDATED IMPORT: Added SYMBOL_CONFIG_KEY_MAP to fix SENSEX lookup
 import SYMBOL_LIST, { SYMBOL_LOT_SIZES, SYMBOL_STRIKE_INCREMENT, SYMBOL_CONFIG_KEY_MAP } from './constants'; 
 import AlgoDashboard from "./components/AlgoDashboard";
 
@@ -12,17 +11,13 @@ const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-
 const BACKEND_URL = 'http://localhost:5000';
 const WS_URL = 'ws://localhost:8080';
 
-// --- HELPER TO RESOLVE SYMBOL KEY (CRITICAL FIX FOR SENSEX) ---
-// This ensures that 'BSE:SENSEX-INDEX' is read as 'SENSEX' to find the Lot Size
+// --- HELPER TO RESOLVE SYMBOL KEY ---
 const getSymbolKey = (symbol) => {
     if (!symbol) return null;
-    // 1. Check direct map (e.g., BSE:SENSEX-INDEX -> SENSEX)
     if (SYMBOL_CONFIG_KEY_MAP[symbol]) return SYMBOL_CONFIG_KEY_MAP[symbol];
-    // 2. Handle Stocks (NSE:RELIANCE-EQ -> RELIANCE)
     if (symbol.includes('NSE:') && symbol.includes('-EQ')) {
         return symbol.split(':')[1].replace('-EQ', '');
     }
-    // 3. Fallback (e.g., NIFTY)
     return symbol;
 };
 
@@ -37,7 +32,6 @@ const LiveCandleChart = ({ data }) => {
     return (
         <div className="h-72 w-full bg-white dark:bg-gray-800 rounded p-4 shadow border border-gray-200 dark:border-gray-700">
             <div className="flex justify-between items-center mb-2">
-                {/* UPDATED LABEL TO 1-MIN */}
                 <h3 className="text-sm font-bold text-indigo-600 dark:text-indigo-400">Live Market Feed (1-Min Candles)</h3>
                 <span className="text-xs text-gray-500">Live WebSocket</span>
             </div>
@@ -177,7 +171,6 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
 };
 
 const findAtmStrike = (spot, symbolKey) => {
-    // FIX: Resolve the key properly before looking up increment
     const resolvedKey = getSymbolKey(symbolKey);
     const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50; 
     return Math.round(spot / increment) * increment;
@@ -185,7 +178,6 @@ const findAtmStrike = (spot, symbolKey) => {
 
 const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolKey) => {
     const newForm = { ...currentForm };
-    // FIX: Resolve the key properly for increments
     const resolvedKey = getSymbolKey(symbolKey);
     const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50;
 
@@ -325,6 +317,12 @@ function App() {
             const symbolKey = liveApiData.symbol; 
             const atmStrike = findAtmStrike(liveApiData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
+            
+            // UPDATED: Grab Lot Size from backend response
+            if (liveApiData.lotSize) {
+                newForm.lotSize = liveApiData.lotSize;
+            }
+
             if (liveApiData.options && liveApiData.options.length > 0) {
                 newForm = updateAllPremiums(newForm, strategy, liveApiData);
             }
@@ -395,8 +393,13 @@ function App() {
             const symbolKey = liveData.symbol || symbol;
             const atmStrike = findAtmStrike(liveData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(defaultFormState, newStrategy, atmStrike, symbolKey);
+            
+            // UPDATED: Grab Lot Size from liveData when switching strategies
+            if (liveData.lotSize) {
+                newForm.lotSize = liveData.lotSize;
+            }
+
             if (liveData.options.length > 0) newForm = updateAllPremiums(newForm, newStrategy, liveData);
-            newForm.lotSize = form.lotSize;
             setForm(newForm);
         } else {
             setForm(prevForm => ({ ...defaultFormState, lotSize: prevForm.lotSize }));
@@ -494,7 +497,6 @@ function App() {
     };
 
     // --- REPLACED BUGGY DIRECT LOOKUP WITH HELPER ---
-    // Now uses getSymbolKey() to ensure hasValidConfig is TRUE for SENSEX/Stocks
     const resolvedConfigKey = getSymbolKey(symbol);
     const hasValidConfig = !!(resolvedConfigKey && SYMBOL_LOT_SIZES[resolvedConfigKey]);
 
@@ -619,7 +621,10 @@ function App() {
                     {strategy && strategyConfigs[strategy]?.fields.map(field => {
                         // FIX: Use the resolved boolean (from getSymbolKey) to allow showing inputs for SENSEX/Stocks
                         if (field === 'lotSize' && !hasValidConfig) return null;
+                        // For fields like premium and strike, we check if lot size is available generally,
+                        // otherwise fallback to manual entry if user wants (removed strict check for stocks)
                         if (!hasValidConfig && (field.startsWith('premium') || field.startsWith('strike') || field === 'stockPrice')) return null;
+                        
                         return (
                             <div key={field} className="col-span-1">
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{formatLabel(field, strategy)}</label>
