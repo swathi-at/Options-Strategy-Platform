@@ -9,7 +9,7 @@ const otpauth = require('otpauth');
 const crypto = require('crypto');
 const fs = require('fs'); 
 const path = require('path'); 
-const readline = require('readline'); // NEW: Required for CSV parsing
+const readline = require('readline'); 
 const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
 const { calculateStrategy } = require('./strategyengine'); 
 const { WebSocketServer } = require('ws');
@@ -37,17 +37,17 @@ const FYERS_API_DATA_URL_V3 = 'https://api-t1.fyers.in/data';
 // Global Storage for Lot Sizes
 const DYNAMIC_LOT_SIZES = {};
 
-// Default Fallbacks (Just in case CSV fetch fails)
+// Default Fallbacks
 const FALLBACK_LOT_SIZES = {
     'NIFTY': 75,
-    'BANKNIFTY': 15,     
+    'BANKNIFTY': 15,      
     'FINNIFTY': 25,
     'MIDCPNIFTY': 50,
     'SENSEX': 10
 };
 
-let fyersAccessToken = null;
-let fyersAppId = null; 
+let fyersAccessToken = process.env.FYERS_TOKEN || null;
+let fyersAppId = process.env.FYERS_CLIENT_ID; // Ensure App ID is also ready
 let isAlgoRunning = false;
 let livePositions = []; 
 let candleHistory = [];
@@ -55,6 +55,7 @@ let currentCandle = null;
 let algoState = { symbol: "NSE:NIFTY50-INDEX", interval: 1, qty: 1, isInTrade: false };
 
 let fyersSocket = null; 
+
 
 const fyersLoginInstance = new fyersModel();
 if (FYERS_APP_ID) {
@@ -79,10 +80,8 @@ function logTradeToCSV(tradeData) {
 }
 
 // ==================================================================
-// 3. LOT SIZE HELPERS (NEW SECTION)
+// 3. LOT SIZE HELPERS
 // ==================================================================
-
-// --- LIVE LOT SIZE FETCHER ---
 async function fetchLiveLotSizes() {
     console.log("📥 Fetching Live Lot Sizes from Fyers Master CSV...");
     try {
@@ -100,13 +99,9 @@ async function fetchLiveLotSizes() {
         let count = 0;
         for await (const line of rl) {
             const cols = line.split(',');
-            // CSV Structure usually: ..., LotSize(col 3), ..., Symbol(col 9), ...
-            // Adjust indices based on actual CSV format check if needed. 
-            // Based on standard Fyers CSV: Column 3 is LotSize, Column 13 is Symbol details, or Column 9 is Symbol.
-            // Let's stick to your provided logic which worked for you:
             if (cols.length > 9) {
-                const symbolCode = cols[9]; // Symbol
-                const lotSize = parseInt(cols[3]); // Lot Size
+                const symbolCode = cols[9]; 
+                const lotSize = parseInt(cols[3]); 
 
                 if (symbolCode && !isNaN(lotSize)) {
                     let rootSymbol = "";
@@ -115,13 +110,11 @@ async function fetchLiveLotSizes() {
                     else if (symbolCode.includes('FINNIFTY')) rootSymbol = 'FINNIFTY';
                     else if (symbolCode.includes('MIDCPNIFTY')) rootSymbol = 'MIDCPNIFTY';
                     else {
-                        // Extract Stock Name for equities e.g., "NSE:SBIN-EQ" or "NSE:SBIN24OCT..."
                         const match = symbolCode.match(/NSE:([A-Z]+)/);
                         if (match) rootSymbol = match[1];
                     }
 
                     if (rootSymbol && lotSize > 0) {
-                        // Only set if not already set or overwrite (usually all expiries have same lot size)
                         if (!DYNAMIC_LOT_SIZES[rootSymbol]) {
                             DYNAMIC_LOT_SIZES[rootSymbol] = lotSize;
                             count++;
@@ -133,7 +126,6 @@ async function fetchLiveLotSizes() {
         DYNAMIC_LOT_SIZES['SENSEX'] = 10; 
         DYNAMIC_LOT_SIZES['BANKEX'] = 15;
         console.log(`✅ Live Lot Sizes Loaded for ${Object.keys(DYNAMIC_LOT_SIZES).length} symbols.`);
-        // console.log("Sample:", DYNAMIC_LOT_SIZES['NIFTY'], DYNAMIC_LOT_SIZES['BANKNIFTY'], DYNAMIC_LOT_SIZES['SBIN']);
     } catch (error) {
         console.error("❌ Failed to fetch Live Lot Sizes:", error.message);
     }
@@ -142,8 +134,6 @@ async function fetchLiveLotSizes() {
 function getLotSizeForSymbol(symbol) {
     if (!symbol) return 1;
     let key = symbol.toUpperCase();
-    
-    // Clean up symbol to get the "Root" name (e.g., NSE:SBIN-EQ -> SBIN)
     if (key.includes('NSE:') && key.includes('-EQ')) key = key.split(':')[1].replace('-EQ', '');
     else if (key.includes('NSE:')) key = key.replace('NSE:', '').split('-')[0];
     
@@ -153,16 +143,11 @@ function getLotSizeForSymbol(symbol) {
     if (key.includes('FINNIFTY')) key = 'FINNIFTY';
     if (key.includes('MIDCPNIFTY')) key = 'MIDCPNIFTY';
 
-    // 1. Try Dynamic Map
     if (DYNAMIC_LOT_SIZES[key]) return DYNAMIC_LOT_SIZES[key];
-    
-    // 2. Try Hardcoded Fallback
     if (FALLBACK_LOT_SIZES[key]) return FALLBACK_LOT_SIZES[key];
 
-    return 1; // Default
+    return 1; 
 }
-
-// CALL THIS ON SERVER START
 fetchLiveLotSizes();
 
 // ==================================================================
@@ -185,7 +170,6 @@ function broadcast(data) {
     const message = JSON.stringify(data);
     uiClients.forEach(client => { if (client.readyState === 1) client.send(message); });
 }
-
 console.log('UI Dashboard WebSocket Server started on port 8080.');
 
 // ==================================================================
@@ -239,120 +223,243 @@ function estimateGreeks(spot, strike, daysToExpiry, premium, type, vix) {
 }
 
 // ==================================================================
-// 6. LOGIC: STRATEGY DEPLOYER
+// 6. LOGIC: STRATEGY ENGINE
 // ==================================================================
-function detectATMStrike(strikes, spot) {
-    return strikes.reduce((prev, curr) => Math.abs(curr - spot) < Math.abs(prev - spot) ? curr : prev);
-}
 
-function chooseStrikeByDelta(chain, side, targetDelta, atmIndex) {
-    const start = Math.max(0, atmIndex - 6);
-    const end = Math.min(chain.length - 1, atmIndex + 6);
-    let best = null; let bestDiff = Infinity;
-
-    for (let i = start; i <= end; i++) {
-        const s = chain[i];
-        const g = (side === 'CE') ? s.CE_Greeks : s.PE_Greeks;
-        if (!g || typeof g.delta === 'undefined') continue;
-        const diff = Math.abs(Math.abs(g.delta) - Math.abs(targetDelta));
-        if (diff < bestDiff) {
-            bestDiff = diff; 
-            best = { 
-                strike: s.strike, 
-                greeks: g, 
-                price: (side === 'CE' ? s.CE_Ltp : s.PE_Ltp),
-                symbol: (side === 'CE' ? s.CE_Symbol : s.PE_Symbol)
-            };
+// --- HELPERS ---
+function detectATM(chain, spot) {
+    let best = chain[0];
+    let diff = Infinity;
+    for (const node of chain) {
+        if(node && node.strike) {
+            const d = Math.abs(node.strike - spot);
+            if (d < diff) { diff = d; best = node; }
         }
     }
-    return best; 
+    return best;
 }
 
-function buildCandidate(chain, atmIndex, stratName) {
-    const candidate = { name: stratName, legs: [], meta: {} };
-    if (stratName === 'Bull Call Spread') {
-        const buy = chooseStrikeByDelta(chain, 'CE', 0.5, atmIndex);
-        const sell = chooseStrikeByDelta(chain, 'CE', 0.25, atmIndex);
-        if (!buy || !sell) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buy.strike, price: buy.price, greeks: buy.greeks, symbol: buy.symbol });
-        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sell.strike, price: sell.price, greeks: sell.greeks, symbol: sell.symbol });
-        candidate.meta.description = `Buy ${buy.strike} CE, Sell ${sell.strike} CE`;
-        return candidate;
-    }
-    if (stratName === 'Bear Put Spread') {
-        const buy = chooseStrikeByDelta(chain, 'PE', 0.5, atmIndex); 
-        const sell = chooseStrikeByDelta(chain, 'PE', 0.25, atmIndex); 
-        if (!buy || !sell) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buy.strike, price: buy.price, greeks: buy.greeks, symbol: buy.symbol });
-        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sell.strike, price: sell.price, greeks: sell.greeks, symbol: sell.symbol });
-        candidate.meta.description = `Buy ${buy.strike} PE, Sell ${sell.strike} PE`;
-        return candidate;
-    }
-    if (stratName === 'Iron Condor') {
-        const sellCall = chooseStrikeByDelta(chain, 'CE', 0.16, atmIndex);
-        const sellPut = chooseStrikeByDelta(chain, 'PE', 0.16, atmIndex);
-        if (!sellCall || !sellPut) return null;
-        const buyCallIdx = Math.min(chain.length - 1, (chain.findIndex(x => x.strike === sellCall.strike) + 2));
-        const buyPutIdx = Math.max(0, (chain.findIndex(x => x.strike === sellPut.strike) - 2));
-        const buyCall = chain[buyCallIdx];
-        const buyPut = chain[buyPutIdx];
-        if (!buyCall || !buyPut) return null;
-        candidate.legs.push({ role: 'SELL', optionType: 'CE', strike: sellCall.strike, price: sellCall.price, greeks: sellCall.greeks, symbol: sellCall.symbol });
-        candidate.legs.push({ role: 'SELL', optionType: 'PE', strike: sellPut.strike, price: sellPut.price, greeks: sellPut.greeks, symbol: sellPut.symbol });
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: buyCall.strike, price: buyCall.CE_Ltp, greeks: buyCall.CE_Greeks, symbol: buyCall.CE_Symbol });
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: buyPut.strike, price: buyPut.PE_Ltp, greeks: buyPut.PE_Greeks, symbol: buyPut.PE_Symbol });
-        candidate.meta.description = `Iron Condor: Short ${sellCall.strike} CE / ${sellPut.strike} PE`;
-        return candidate;
-    }
-    if (stratName === 'Long Straddle') {
-        const atm = chain[atmIndex];
-        if (!atm) return null;
-        candidate.legs.push({ role: 'BUY', optionType: 'CE', strike: atm.strike, price: atm.CE_Ltp, greeks: atm.CE_Greeks, symbol: atm.CE_Symbol });
-        candidate.legs.push({ role: 'BUY', optionType: 'PE', strike: atm.strike, price: atm.PE_Ltp, greeks: atm.PE_Greeks, symbol: atm.PE_Symbol });
-        candidate.meta.description = `Long Straddle @ ${atm.strike}`;
-        return candidate;
-    }
-    return null;
+function expectedMove(spot, iv, dte) {
+    const volatility = iv / 100;
+    const t = dte / 365;
+    return spot * volatility * Math.sqrt(t);
 }
 
-function decideStrategy(signal, spot, daysToExpiry, optionChain, vix, config = {}) {
-    let candidatesToTry = [];
-    const VIX_HIGH = 18; 
+function chooseClosest(chain, target) {
+    let best = chain[0];
+    let diff = Infinity;
+    for (const node of chain) {
+        if(node && node.strike) {
+            const d = Math.abs(node.strike - target);
+            if (d < diff) { diff = d; best = node; }
+        }
+    }
+    return best;
+}
+
+// --- STRATEGY CONSTRUCTORS ---
+
+// 1. Bull Call Spread Helper
+function bullCallSpread(buyCall, sellCall) {
+    return {
+        name: "Bull Call Spread",
+        legs: [
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }
+        ]
+    };
+}
+
+// 2. Bear Put Spread Helper
+function bearPutSpread(buyPut, sellPut) {
+    return {
+        name: "Bear Put Spread",
+        legs: [
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }
+        ]
+    };
+}
+
+// 3. Bear Call Spread Helper (Often missing!)
+function bearCallSpread(sellCall, buyCall) {
+    return {
+        name: "Bear Call Spread",
+        legs: [
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+        ]
+    };
+}
+
+function shortStraddle(chain, atm) {
+    return {
+        name: "Short Straddle",
+        legs: [
+            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
+            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+        ]
+    };
+}
+
+function shortStrangle(sellPut, sellCall) {
+    return {
+        name: "Short Strangle",
+        legs: [
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }
+        ]
+    };
+}
+
+function ironCondor(sellPut, buyPut, sellCall, buyCall) {
+    return {
+        name: "Iron Condor",
+        legs: [
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
+            { action: "BUY",  type: "PE", strike: buyPut.strike,  price: buyPut.PE.ltp,  greeks: buyPut.PE },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
+            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp,  greeks: buyCall.CE }
+        ]
+    };
+}
+
+function ironButterfly(chain, atmIndex) {
+    const atm = chain[atmIndex];
+    const lower = chain[atmIndex - 1] || chain[atmIndex]; 
+    const upper = chain[atmIndex + 1] || chain[atmIndex]; 
+    return {
+        name: "Iron Butterfly",
+        legs: [
+            { action: "BUY",  type: "PE", strike: lower.strike, price: lower.PE.ltp, greeks: lower.PE },
+            { action: "SELL", type: "PE", strike: atm.strike,   price: atm.PE.ltp,   greeks: atm.PE },
+            { action: "SELL", type: "CE", strike: atm.strike,   price: atm.CE.ltp,   greeks: atm.CE },
+            { action: "BUY",  type: "CE", strike: upper.strike, price: upper.CE.ltp, greeks: upper.CE }
+        ]
+    };
+}
+
+function jadeLizard(sellPut, sellCall, buyCall) {
+    return {
+        name: "Jade Lizard",
+        legs: [
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
+            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp,  greeks: buyCall.CE }
+        ]
+    };
+}
+
+function putCreditSpread(sellPut, buyPut) {
+    return {
+        name: "Put Credit Spread",
+        legs: [
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
+            { action: "BUY",  type: "PE", strike: buyPut.strike,  price: buyPut.PE.ltp,  greeks: buyPut.PE }
+        ]
+    };
+}
+
+// --- SELECTOR FUNCTION (Team Lead Structure + Safety Patches) ---
+function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
+    console.log(`🔍 DEBUG SPOT CHECK: The Bot thinks Spot is: ${spot}`);
+
+    // [PATCH 1] Critical Safety Check for Spot Price
+    if (!spot || spot === 0 || isNaN(spot)) {
+        console.error("❌ CRITICAL: Invalid Spot Price detected:", spot);
+        return { error: "Invalid Spot Price (0 or null). Cannot calculate targets." };
+    }
+
+    chain = chain.filter(c => 
+        c?.CE && c?.PE &&          // Must have CE and PE objects
+        c.strike > 0               // Must have a real strike price (Removes -1)
+    );
+    if (chain.length > 0) {
+        console.log(`📊 CHAIN RANGE: ${chain[0].strike} to ${chain[chain.length-1].strike} (Total: ${chain.length})`);
+    }
+    if (chain.length < 5) {
+        return { error: "Option chain too small, cannot build strategy." };
+    }
+
+    // 2. Detect ATM
+    const atm = detectATM(chain, spot);
+    const atmIndex = chain.findIndex(x => x.strike === atm.strike);
+
+    // Ensure ATM index is valid
+    if (atmIndex < 2 || atmIndex > chain.length - 3) {
+        return { error: "ATM index out of range. Try another expiry." };
+    }
+
+    // 3. Expected Move logic (Your Math is Verified Correct)
+    const iv = atm.CE.iv || atm.PE.iv || 0.12;
+    const em = expectedMove(spot, iv, dte);
+
+    const lowerTarget = spot - em;
+    const upperTarget = spot + em;
+
+    // 4. Choose closest valid strikes
+    let sellPut = chooseClosest(chain, lowerTarget);
+    let sellCall = chooseClosest(chain, upperTarget);
+
+    // Validate SELL PUT / CALL
+    if (!sellPut?.PE || !sellCall?.CE) {
+        // fallback to ATM ± 2
+        sellPut = chain[atmIndex - 2];
+        sellCall = chain[atmIndex + 2];
+    }
+
+    // [PATCH 2] Prevent Wash Trades (Buying & Selling same strike)
+    let sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
+    let sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
+
+    if (sellPutIndex === 0) { sellPutIndex = 1; sellPut = chain[sellPutIndex]; }
+    if (sellCallIndex === chain.length - 1) { sellCallIndex = chain.length - 2; sellCall = chain[sellCallIndex]; }
+
+    // 5. BUY wings (safe indexing)
+    const buyPut = chain[sellPutIndex - 1]; 
+    const buyCall = chain[sellCallIndex + 1];
+
+    if (!buyPut?.PE || !buyCall?.CE) {
+        return { error: "Could not find safe wing strikes. Narrow option chain." };
+    }
+
+    // 6. Build strategy list
+    const strategies = [];
+
+    strategies.push(shortStraddle(chain, atm));             // 0
+    strategies.push(shortStrangle(sellPut, sellCall));      // 1
+    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall)); // 2
+    strategies.push(ironButterfly(chain, atmIndex));        // 3
+    strategies.push(jadeLizard(sellPut, sellCall, buyCall)); // 4
     
-    if (daysToExpiry >= 4) {
-        if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
-        else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
-        else {
-            if (vix > VIX_HIGH) candidatesToTry = ['Long Straddle']; 
-            else candidatesToTry = ['Iron Condor'];
-        }
+    strategies.push(putCreditSpread(sellPut, buyPut));      // 5
+    strategies.push(bullCallSpread(atm, sellCall));         // 6 
+
+    strategies.push(bearCallSpread(sellCall, buyCall));     // 7
+    strategies.push(bearPutSpread(atm, sellPut));           // 8 
+
+    // [PATCH 3] Dynamic Selection based on Frontend Signal
+    let chosenStrategy;
+    if (signal === "BULL") {
+        chosenStrategy = strategies[5]; // Put Credit Spread
+    } else if (signal === "BEAR") {
+        chosenStrategy = strategies[7]; // Bear Call Spread
     } else {
-        if (signal.direction === 'BULL') candidatesToTry = ['Bull Call Spread'];
-        else if (signal.direction === 'BEAR') candidatesToTry = ['Bear Put Spread'];
-        else candidatesToTry = ['Iron Condor'];
+        chosenStrategy = strategies[2]; // Iron Condor (Default Neutral)
     }
 
-    const strikesList = optionChain.map(c => c.strike);
-    const atm = detectATMStrike(strikesList, spot);
-    const atmIndex = strikesList.indexOf(atm);
-    if (atmIndex === -1) return { decision: 'SKIP', reason: 'ATM Strike not found' };
-
-    const built = [];
-    for (const sname of candidatesToTry) {
-        const candidate = buildCandidate(optionChain, atmIndex, sname);
-        if (!candidate) continue;
-        let score = 50; 
-        if (sname.includes('Spread')) score += 20; 
-        if (sname.includes('Condor') && vix < 15) score += 30; 
-        candidate.score = score;
-        built.push(candidate);
-    }
-    built.sort((a,b) => b.score - a.score);
-    const chosen = built.length ? built[0] : null;
-    if (chosen) return { decision: 'PLACE', strategy: chosen.name, legs: chosen.legs, meta: chosen.meta, score: chosen.score };
-    return { decision: 'SKIP', reason: `No valid candidates found for ${signal.direction}` };
+    return {
+        spot,
+        atmStrike: atm.strike,
+        expectedMove: Math.round(em),
+        sellPut: sellPut.strike,
+        buyPut: buyPut.strike,
+        sellCall: sellCall.strike,
+        buyCall: buyCall.strike,
+        chosenStrategy: chosenStrategy, 
+        strategies
+    };
 }
-
 // ==================================================================
 // 7. AUTH ROUTES
 // ==================================================================
@@ -552,7 +659,19 @@ async function fetchMarketDataWithGreeks(symbol) {
     const spotData = quotesRes.data.d.find(q => q.n === underlyingSymbolFyers);
     const vixData = quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX');
     
-    const spotPrice = spotData?.v?.lp || 0;
+    let spotPrice = spotData?.v?.lp || 0;
+
+    // Safety: If Spot is 0, try to calculate it from the ATM option
+    if (!spotPrice || spotPrice === 0) {
+        console.warn("⚠️ Warning: Direct Spot Price was 0. Estimating from Options...");
+        // Find the option with the HIGHEST Open Interest (usually near ATM) 
+        // OR just take the middle of the chain as a fallback
+        if (chainRes?.data?.optionsChain && chainRes.data.optionsChain.length > 0) {
+             const middleOption = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length / 2)];
+             spotPrice = middleOption.strike_price;
+             console.log(`⚠️ Estimated Spot Price set to: ${spotPrice}`);
+        }
+    }
     const indiaVix = vixData?.v?.lp || 14.5; 
 
     let effectiveVix = indiaVix;
@@ -579,7 +698,8 @@ async function fetchMarketDataWithGreeks(symbol) {
     // --- INDEX LOGIC ---
     let chainRes;
     try {
-        chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 30, timestamp: "" });
+        // UPDATED: Increased strike count to 50 to find wide wings
+        chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 200, timestamp: "" });
     } catch (error) {
         console.error("Option Chain API Request Error:", error.message);
     }
@@ -595,24 +715,43 @@ async function fetchMarketDataWithGreeks(symbol) {
             const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
             if (expiryEpoch) {
                 const diffTime = (new Date(expiryEpoch * 1000).getTime()) - (new Date().getTime());
-                daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                const daysToExpiryCalc = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                daysToExpiry = daysToExpiryCalc;
                 if (daysToExpiry <= 0) daysToExpiry = 0.001; 
             }
 
-            // Option Chain Greeks Population
+            // Option Chain Construction - MODIFIED FOR NESTED STRUCTURE
             chainRes.data.optionsChain.forEach(opt => {
                 if (!strikeMap.has(opt.strike_price)) {
-                    strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE_Ltp: 0, PE_Ltp: 0, CE_Greeks: {}, PE_Greeks: {} });
+                    strikeMap.set(opt.strike_price, { 
+                        strike: opt.strike_price, 
+                        CE: {}, 
+                        PE: {} 
+                    });
                 }
                 const item = strikeMap.get(opt.strike_price);
+                const greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, opt.option_type, effectiveVix);
+
                 if (opt.option_type === 'CE') {
-                    item.CE_Ltp = opt.ltp;
-                    item.CE_Symbol = opt.symbol; 
-                    item.CE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'CE', effectiveVix);
+                    item.CE = {
+                        ltp: opt.ltp,
+                        symbol: opt.symbol,
+                        iv: greeks.iv,
+                        delta: greeks.delta,
+                        theta: greeks.theta,
+                        gamma: greeks.gamma,
+                        vega: greeks.vega
+                    };
                 } else if (opt.option_type === 'PE') {
-                    item.PE_Ltp = opt.ltp;
-                    item.PE_Symbol = opt.symbol; 
-                    item.PE_Greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, 'PE', effectiveVix);
+                    item.PE = {
+                        ltp: opt.ltp,
+                        symbol: opt.symbol,
+                        iv: greeks.iv,
+                        delta: greeks.delta,
+                        theta: greeks.theta,
+                        gamma: greeks.gamma,
+                        vega: greeks.vega
+                    };
                 }
             });
         }
@@ -657,58 +796,125 @@ app.post('/api/decide-and-build-order', async (req, res) => {
     try {
         const { signal, symbol } = req.body;
         const marketData = await fetchMarketDataWithGreeks(symbol);
-        const decision = decideStrategy(signal, marketData.spot, marketData.daysToExpiry, marketData.options, marketData.vix);
+        
+        // --- USING TEAM LEAD'S SENSIBULL SELECTOR ---
+        const decision = sensibullSelector(marketData.options, marketData.spot, marketData.daysToExpiry, signal.direction);
+        
+        if (decision.error) {
+            return res.status(400).json({ decision: 'SKIP', reason: decision.error });
+        }
+
+        decision.decision = 'PLACE';
         decision.signal = signal.direction; 
-        decision.spot = marketData.spot; 
+        
+        if (decision.chosenStrategy) {
+            decision.strategy = decision.chosenStrategy.name;
+            decision.legs = decision.chosenStrategy.legs;
+        }
+
         res.json(decision);
     } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
 });
 
+// --- UPDATED EXECUTE TRADE FUNCTION (MULTI-LEG SUPPORT) ---
 app.post('/api/execute-trade', async (req, res) => {
+    // 1. Auth Check
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     
     try {
         const { strategy, decisionData } = req.body;
         
+        // 2. Validate Data
         if (!decisionData || !decisionData.legs || decisionData.legs.length === 0) {
-            return res.status(400).json({ error: "Invalid trade data" });
+            return res.status(400).json({ error: "Invalid trade data: No legs found." });
         }
 
-        const leg = decisionData.legs[0]; 
-        
-        let actualSymbol = leg.symbol;
-        if (!actualSymbol) {
-             const marketData = await fetchMarketDataWithGreeks(algoState.symbol);
-             const opt = marketData.options.find(o => o.strike === leg.strike);
-             actualSymbol = leg.optionType === 'CE' ? opt.CE_Symbol : opt.PE_Symbol;
+        console.log(`🚀 Executing Strategy: ${strategy} (${decisionData.legs.length} Legs)`);
+
+        // 3. Prepare to track results for all legs
+        const executedLegs = [];
+        const errors = [];
+
+        // 4. LOOP THROUGH ALL LEGS
+        for (const leg of decisionData.legs) {
+            try {
+                // --- A. Resolve Symbol for THIS specific leg ---
+                let actualSymbol = leg.greeks?.symbol; // Try Sensibull structure first
+                
+                if (!actualSymbol) actualSymbol = leg.symbol; // Try root structure
+
+                // Fallback: Fetch live chain if symbol is missing
+                if (!actualSymbol) {
+                     console.log(`🔍 Resolving Symbol for Strike ${leg.strike} (${leg.type || leg.optionType})...`);
+                     // Note: We use algoState.symbol (Underlying) to fetch the chain
+                     const marketData = await fetchMarketDataWithGreeks(algoState.symbol); 
+                     const opt = marketData.options.find(o => o.strike === Number(leg.strike));
+                     
+                     if (opt) {
+                         const type = leg.type || leg.optionType; 
+                         if (type === 'CE') actualSymbol = opt.CE?.symbol || opt.CE_Symbol;
+                         else if (type === 'PE') actualSymbol = opt.PE?.symbol || opt.PE_Symbol;
+                     }
+                }
+
+                if (!actualSymbol) {
+                    throw new Error(`Could not resolve trading symbol for Strike ${leg.strike}`);
+                }
+
+                // --- B. Execute (Simulation or Live) ---
+                const entryPrice = leg.price || 100; // Mock price if 0
+                const quantity = (leg.qty || 1) * (algoState.lotSize || 1); // Respect Lot Size if needed
+
+                console.log(`[EXECUTION] ${leg.action} ${quantity} ${actualSymbol} @ ~${entryPrice}`);
+
+                // --- LIVE ORDER CALL (Uncomment to go live) ---
+                // const side = leg.action === 'BUY' ? 1 : -1;
+                // const orderRes = await placeLiveOrder(actualSymbol, quantity, side);
+                // console.log("Order ID:", orderRes.id);
+
+                // --- SIMULATION RECORD ---
+                const newPosition = {
+                    instrument: actualSymbol,
+                    buyPrice: entryPrice, // For simulation, we assume fill at current LTP
+                    qty: quantity, 
+                    // Stop Loss / Target logic per leg (or manage globally)
+                    stopLossPrice: entryPrice * 0.80, 
+                    targetPrice: entryPrice * 1.10,
+                    startTime: new Date().toLocaleTimeString(),
+                    signal: decisionData.signal || 'MANUAL',
+                    strategy: strategy,
+                    spot: decisionData.spot, 
+                    strike: leg.strike,
+                    type: leg.type || leg.optionType,
+                    action: leg.action
+                };
+
+                executedLegs.push(newPosition);
+
+            } catch (legError) {
+                console.error(`❌ Failed to execute leg ${leg.strike}:`, legError.message);
+                errors.push({ strike: leg.strike, error: legError.message });
+            }
         }
 
-        // --- SIMULATION MODE START ---
-        console.log(`[SIMULATION] Virtual Order Placed: BUY 1 ${actualSymbol} @ ~${leg.price}`);
-        
-        const entryPrice = leg.price || 100; 
-        
-        const newPosition = {
-            instrument: actualSymbol,
-            buyPrice: entryPrice,
-            qty: 1, 
-            stopLossPrice: entryPrice * 0.80, 
-            targetPrice: entryPrice * 1.10,
-            startTime: new Date().toLocaleTimeString(),
-            signal: decisionData.signal || 'MANUAL',
-            strategy: strategy,
-            spot: decisionData.spot, 
-            strike: leg.strike        
-        };
-
-        livePositions = [newPosition]; 
-        algoState.isInTrade = true;
-
-        res.json({ success: true, message: "Simulation Auto-Trade Executed", position: newPosition });
-        // --- SIMULATION MODE END ---
+        // 5. Update Global State (Store all new positions)
+        if (executedLegs.length > 0) {
+            livePositions = [...livePositions, ...executedLegs]; // Add to existing portfolio
+            algoState.isInTrade = true;
+            
+            res.json({ 
+                success: true, 
+                message: `Executed ${executedLegs.length} / ${decisionData.legs.length} legs.`, 
+                positions: executedLegs,
+                errors: errors.length > 0 ? errors : null
+            });
+        } else {
+            res.status(500).json({ error: "All legs failed to execute.", details: errors });
+        }
 
     } catch (error) {
-        res.status(500).json({ error: "Execution Failed", details: error.message });
+        console.error("Critical Execution Error:", error.message);
+        res.status(500).json({ error: "Execution Logic Failed", details: error.message });
     }
 });
 
@@ -779,7 +985,8 @@ function findCurrentPrice(symbol, strike, optionType) {
         const cached = liveDataCache[key];
         if (!cached || !cached.data) return null;
         const opt = cached.data.options.find(o => o.strike === Number(strike));
-        return opt ? (optionType === 'CE' ? opt.CE_Ltp : opt.PE_Ltp) : null;
+        // MODIFIED FOR NEW NESTED STRUCTURE
+        return opt ? (optionType === 'CE' ? opt.CE.ltp : opt.PE.ltp) : null;
     } catch (err) { return null; }
 }
 
@@ -789,9 +996,9 @@ app.post('/api/paper-trade', (req, res) => {
         let totalCost = 0;
         const procLegs = [];
         for (const leg of legs) {
-            const price = findCurrentPrice(symbol, leg.strike, leg.optionType);
+            const price = findCurrentPrice(symbol, leg.strike, leg.type || leg.optionType); // Handle both formats
             const finalPrice = (price !== null) ? price : leg.price;
-            if (!finalPrice) throw new Error(`Price not found for ${leg.strike} ${leg.optionType}`);
+            if (!finalPrice) throw new Error(`Price not found for ${leg.strike} ${leg.type}`);
             procLegs.push({ ...leg, entryPrice: finalPrice, currentPrice: finalPrice, pnl: 0 });
             totalCost += (finalPrice * (leg.action === 'BUY' ? 1 : -1) * leg.qty);
         }
@@ -809,7 +1016,7 @@ setInterval(() => {
     paperTrades.filter(t => t.status === 'OPEN').forEach(trade => {
         let netPnl = 0;
         trade.legs.forEach(leg => {
-            const price = findCurrentPrice(trade.symbol, leg.strike, leg.optionType);
+            const price = findCurrentPrice(trade.symbol, leg.strike, leg.type || leg.optionType);
             if (price) {
                 leg.currentPrice = price;
                 leg.pnl = (price - leg.entryPrice) * (leg.action === 'BUY' ? 1 : -1) * leg.qty;
@@ -819,6 +1026,12 @@ setInterval(() => {
         trade.currentNetPnl = netPnl;
     });
 }, 2000);
+
+if (fyersAccessToken) {
+    console.log("🚀 Manual Token Detected in .env");
+    console.log("🔄 Auto-starting Algo System...");
+    startAlgoSystem();
+}
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });

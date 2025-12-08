@@ -239,6 +239,32 @@ function App() {
         document.documentElement.classList.toggle('dark', theme === 'dark');
     }, [theme]);
     const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
+    useEffect(() => {
+        // Only run if we are in Live Mode and have valid data
+        if (isLiveMode && liveData) {
+            
+            // 1. Find ATM Strike for current Spot
+            const symbolKey = liveData.symbol || symbol;
+            const atmStrike = findAtmStrike(liveData.spot, symbolKey);
+            
+            // 2. Update Strikes based on Strategy (e.g. Iron Condor needs 4 strikes)
+            let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
+            
+            // 3. Update Premiums from the new Option Chain
+            if (liveData.options && liveData.options.length > 0) {
+                newForm = updateAllPremiums(newForm, strategy, liveData);
+            }
+
+            // 4. Update Lot Size
+            if (liveData.lotSize) {
+                newForm.lotSize = liveData.lotSize;
+            }
+
+            // 5. Update State
+            setForm(newForm);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [liveData, strategy, isLiveMode]);
 
     useEffect(() => {
         const ws = new WebSocket(WS_URL);
@@ -267,7 +293,7 @@ function App() {
         return () => ws.close();
     }, []);
 
-    // --- PREMIUM AUTO-FILLER ---
+    // --- PREMIUM AUTO-FILLER (UPDATED FOR NESTED STRUCTURE) ---
     const updateAllPremiums = useCallback((currentForm, currentStrategy, currentSymbolData) => {
         if (!currentSymbolData || !currentSymbolData.options || currentSymbolData.options.length === 0) return currentForm;
         
@@ -275,7 +301,8 @@ function App() {
         const findPrice = (strike, type) => {
             if (!strike) return '';
             const opt = currentSymbolData.options.find(o => o.strike === Number(strike));
-            return opt ? ((type === 'CE') ? opt.CE_Ltp : opt.PE_Ltp) : '';
+            // Correctly accessing the nested structure: opt.CE.ltp or opt.PE.ltp
+            return opt ? ((type === 'CE') ? opt.CE?.ltp : opt.PE?.ltp) : '';
         };
 
         if (['long-call', 'short-call', 'protective-call', 'synthetic-long-stock', 'synthetic-short-stock'].includes(currentStrategy)) {
@@ -293,7 +320,7 @@ function App() {
         } 
         else if (['long-straddle', 'short-straddle', 'calendar-spread'].includes(currentStrategy)) {
             newForm.premium1 = findPrice(newForm.strike, 'CE'); newForm.premium2 = findPrice(newForm.strike, 'PE');
-            if(currentStrategy === 'calendar-spread') newForm.premium2 = findPrice(newForm.strike, 'CE'); // Simplification
+            if(currentStrategy === 'calendar-spread') newForm.premium2 = findPrice(newForm.strike, 'CE'); 
         } 
         else if (['long-strangle', 'short-strangle'].includes(currentStrategy)) {
             newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'CE');
@@ -318,7 +345,7 @@ function App() {
             const atmStrike = findAtmStrike(liveApiData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
             
-            // UPDATED: Grab Lot Size from backend response
+            // Grab Lot Size from backend response
             if (liveApiData.lotSize) {
                 newForm.lotSize = liveApiData.lotSize;
             }
@@ -394,7 +421,7 @@ function App() {
             const atmStrike = findAtmStrike(liveData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(defaultFormState, newStrategy, atmStrike, symbolKey);
             
-            // UPDATED: Grab Lot Size from liveData when switching strategies
+            // Grab Lot Size from liveData when switching strategies
             if (liveData.lotSize) {
                 newForm.lotSize = liveData.lotSize;
             }
@@ -461,7 +488,7 @@ function App() {
 
     const formatValue = (value) => (typeof value === 'number') ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value;
 
-    // --- RENDER GREEKS TABLE ---
+    // --- RENDER GREEKS TABLE (UPDATED FOR NESTED STRUCTURE) ---
     const renderGreeksTable = () => {
         if (!liveData || !liveData.options) return null;
         const atmIndex = liveData.options.reduce((closestIdx, opt, idx, arr) => Math.abs(opt.strike - liveData.spot) < Math.abs(arr[closestIdx].strike - liveData.spot) ? idx : closestIdx, 0);
@@ -481,13 +508,16 @@ function App() {
                     <tbody>
                         {subset.map(row => (
                             <tr key={row.strike} className={row.strike === liveData.options[atmIndex].strike ? "bg-blue-50 dark:bg-blue-900/30 font-bold" : "border-b dark:border-gray-700"}>
-                                <td className="p-2 text-green-600">{row.CE_Greeks?.delta?.toFixed(2)}</td>
-                                <td className="p-2">{row.CE_Greeks?.gamma?.toFixed(4)}</td>
-                                <td className="p-2 text-red-500">{row.CE_Greeks?.theta?.toFixed(1)}</td>
+                                {/* Using Optional Chaining for new structure */}
+                                <td className="p-2 text-green-600">{row.CE?.delta?.toFixed(2) || '-'}</td>
+                                <td className="p-2">{row.CE?.gamma?.toFixed(4) || '-'}</td>
+                                <td className="p-2 text-red-500">{row.CE?.theta?.toFixed(1) || '-'}</td>
+                                
                                 <td className="p-2 font-bold">{row.strike}</td>
-                                <td className="p-2 text-red-600">{row.PE_Greeks?.delta?.toFixed(2)}</td>
-                                <td className="p-2">{row.PE_Greeks?.gamma?.toFixed(4)}</td>
-                                <td className="p-2 text-red-500">{row.PE_Greeks?.theta?.toFixed(1)}</td>
+                                
+                                <td className="p-2 text-red-600">{row.PE?.delta?.toFixed(2) || '-'}</td>
+                                <td className="p-2">{row.PE?.gamma?.toFixed(4) || '-'}</td>
+                                <td className="p-2 text-red-500">{row.PE?.theta?.toFixed(1) || '-'}</td>
                             </tr>
                         ))}
                     </tbody>
