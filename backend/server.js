@@ -617,160 +617,139 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     console.log(`🚀 PLACING ORDER: ${side===1?'BUY':'SELL'} ${qty} ${symbol}`);
     return await fyers.place_order(payload);
 }
-
-// Replaced fetchStockLotSize with the generic getLotSizeForSymbol
+// ==================================================================
+// 🌍 UNIVERSAL MARKET DATA FETCHER (WITH DEBUG & FALLBACK)
+// ==================================================================
 async function fetchMarketDataWithGreeks(symbol) {
     let inputSymbol = symbol.toUpperCase();
     let underlyingSymbolFyers = '';
     let userFriendlyKey = '';
-    let isIndex = false;
 
-    if (inputSymbol === 'NIFTY') { underlyingSymbolFyers = 'NSE:NIFTY50-INDEX'; userFriendlyKey = 'NIFTY'; isIndex = true; }
-    else if (inputSymbol === 'BANKNIFTY') { underlyingSymbolFyers = 'NSE:NIFTYBANK-INDEX'; userFriendlyKey = 'BANKNIFTY'; isIndex = true; }
-    else if (inputSymbol === 'FINNIFTY') { underlyingSymbolFyers = 'NSE:FINNIFTY-INDEX'; userFriendlyKey = 'FINNIFTY'; isIndex = true; }
-    else if (inputSymbol === 'MIDCPNIFTY') { underlyingSymbolFyers = 'NSE:MIDCPNIFTY-INDEX'; userFriendlyKey = 'MIDCPNIFTY'; isIndex = true; }
-    else if (inputSymbol === 'SENSEX' || inputSymbol.includes('SENSEX')) { underlyingSymbolFyers = 'BSE:SENSEX-INDEX'; userFriendlyKey = 'SENSEX'; isIndex = true; }
-    else if (inputSymbol.includes('NSE:') && inputSymbol.includes('-EQ')) {
-        underlyingSymbolFyers = inputSymbol; 
-        userFriendlyKey = inputSymbol.split(':')[1].replace('-EQ', '');
-        isIndex = false; 
+    // 1. DYNAMIC SYMBOL MAPPING
+    const indexMap = {
+        'NIFTY': 'NSE:NIFTY50-INDEX',
+        'BANKNIFTY': 'NSE:NIFTYBANK-INDEX',
+        'FINNIFTY': 'NSE:FINNIFTY-INDEX',
+        'MIDCPNIFTY': 'NSE:MIDCPNIFTY-INDEX',
+        'SENSEX': 'BSE:SENSEX-INDEX',
+        'BANKEX': 'BSE:BANKEX-INDEX'
+    };
+
+    if (indexMap[inputSymbol]) {
+        underlyingSymbolFyers = indexMap[inputSymbol];
+        userFriendlyKey = inputSymbol;
+    } 
+    else if (inputSymbol.includes(':')) {
+        underlyingSymbolFyers = inputSymbol;
+        userFriendlyKey = inputSymbol.split(':')[1].replace(/-EQ|-INDEX/g, '');
+    } 
+    else {
+        // Assume Stock -> Default to NSE Equity
+        underlyingSymbolFyers = `NSE:${inputSymbol}-EQ`;
+        userFriendlyKey = inputSymbol;
     }
-    else { underlyingSymbolFyers = inputSymbol; userFriendlyKey = inputSymbol; isIndex = false; } 
 
-    // --- GET LOT SIZE FROM DYNAMIC MAP ---
+    // 2. Get Lot Size
     let lotSize = getLotSizeForSymbol(userFriendlyKey || underlyingSymbolFyers);
-    // -------------------------------------
 
-    if (fyersSocket && algoState.symbol !== underlyingSymbolFyers) {
-        console.log(`🔄 Switching Feed: ${algoState.symbol} -> ${underlyingSymbolFyers}`);
-        fyersSocket.unsubscribe([algoState.symbol]);
-        fyersSocket.subscribe([underlyingSymbolFyers]);
-        algoState.symbol = underlyingSymbolFyers;
-        candleHistory = [];
-        currentCandle = null;
-        broadcast({ type: 'HISTORY', data: [] });
-    }
-
+    // 3. Fetch Spot Price & VIX
     const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
         params: { symbols: `${underlyingSymbolFyers},NSE:INDIAVIX-INDEX` }, 
         headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
     });
     
-    const spotData = quotesRes.data.d.find(q => q.n === underlyingSymbolFyers);
-    const vixData = quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX');
-    
-    let spotPrice = spotData?.v?.lp || 0;
+    const spotNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === underlyingSymbolFyers) : null;
+    const vixNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX') : null;
 
-    // Safety: If Spot is 0, try to calculate it from the ATM option
-    if (!spotPrice || spotPrice === 0) {
-        console.warn("⚠️ Warning: Direct Spot Price was 0. Estimating from Options...");
-        // Find the option with the HIGHEST Open Interest (usually near ATM) 
-        // OR just take the middle of the chain as a fallback
-        if (chainRes?.data?.optionsChain && chainRes.data.optionsChain.length > 0) {
-             const middleOption = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length / 2)];
-             spotPrice = middleOption.strike_price;
-             console.log(`⚠️ Estimated Spot Price set to: ${spotPrice}`);
-        }
-    }
-    const indiaVix = vixData?.v?.lp || 14.5; 
+    let spotPrice = spotNode?.v?.lp || 0;
+    let effectiveVix = vixNode?.v?.lp || 14.5;
+    if (['ADANIENT', 'ADANIGREEN'].includes(userFriendlyKey)) effectiveVix = 25.0;
 
-    let effectiveVix = indiaVix;
-    if (['NSE:ADANIENT-EQ', 'NSE:ADANIGREEN-EQ', 'NSE:TATAMOTORS-EQ'].includes(underlyingSymbolFyers)) {
-            effectiveVix = 22.5; 
-    }
-
+    // 4. PREPARE OPTION CHAIN FETCH
     const fyers = new fyersModel();
     fyers.setAppId(fyersAppId);
     fyers.setAccessToken(fyersAccessToken);
-    
-    if (!isIndex) {
-        return {
-            symbol: userFriendlyKey,
-            fyersSymbol: underlyingSymbolFyers,
-            spot: spotPrice,
-            vix: effectiveVix, 
-            daysToExpiry: 0, 
-            options: [],
-            lotSize: lotSize 
-        };
-    }
 
-    // --- INDEX LOGIC ---
     let chainRes;
+    let daysToExpiry = 0;
+    let optionsList = [];
+
     try {
-        // UPDATED: Increased strike count to 50 to find wide wings
-        chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 200, timestamp: "" });
-    } catch (error) {
-        console.error("Option Chain API Request Error:", error.message);
-    }
-    
-    let daysToExpiry = 7; 
-    const strikeMap = new Map();
-    
-    try {
-        if (!chainRes || !chainRes.data || !chainRes.data.optionsChain) {
-            console.error("❌ Option chain failed or was empty.");
-        } else {
-            // Days to Expiry Calculation
-            const expiryEpoch = chainRes.data.expiryData?.[0]?.date;
-            if (expiryEpoch) {
-                const diffTime = (new Date(expiryEpoch * 1000).getTime()) - (new Date().getTime());
-                const daysToExpiryCalc = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                daysToExpiry = daysToExpiryCalc;
-                if (daysToExpiry <= 0) daysToExpiry = 0.001; 
+        // ------------------------------------------------------
+        // 🚀 DEBUG EXPIRE LOGIC
+        // ------------------------------------------------------
+        const metaRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 1, timestamp: "" });
+        
+        // LOG: See exactly what Fyers sent back
+        // console.log(`🔍 [${userFriendlyKey}] Raw Dates:`, JSON.stringify(metaRes.data?.expiryData));
+
+        if (metaRes.data && metaRes.data.expiryData) {
+            const now = new Date().getTime();
+            
+            // Filter for FUTURE dates
+            const validExpiries = metaRes.data.expiryData.filter(e => new Date(e.date * 1000).getTime() > now);
+            
+            // Sort to find the NEAREST one
+            const nearestExpiry = validExpiries.sort((a,b) => a.date - b.date)[0];
+
+            if (nearestExpiry) {
+                const expiryTimestamp = nearestExpiry.date;
+                const diffTime = (new Date(expiryTimestamp * 1000).getTime()) - now;
+                daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                if (daysToExpiry < 0) daysToExpiry = 0;
+
+                console.log(`📅 [${userFriendlyKey}] Nearest Expiry: ${nearestExpiry.date_string} (DTE: ${daysToExpiry})`);
+
+                // FETCH FULL CHAIN (Specific Date)
+                chainRes = await fyers.getOptionChain({ 
+                    symbol: underlyingSymbolFyers, 
+                    strikecount: 100, 
+                    timestamp: expiryTimestamp 
+                });
+            } else {
+                // 🚨 FALLBACK: If no future date found (e.g. system time issue), FETCH BLINDLY
+                console.warn(`⚠️ Filter removed all dates for ${userFriendlyKey}. Fetching default chain...`);
+                chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 100, timestamp: "" });
             }
+        }
+    } catch (error) {
+        console.error(`❌ Chain Fetch Error (${userFriendlyKey}):`, error.message);
+    }
 
-            // Option Chain Construction - MODIFIED FOR NESTED STRUCTURE
-            chainRes.data.optionsChain.forEach(opt => {
-                if (!strikeMap.has(opt.strike_price)) {
-                    strikeMap.set(opt.strike_price, { 
-                        strike: opt.strike_price, 
-                        CE: {}, 
-                        PE: {} 
-                    });
-                }
-                const item = strikeMap.get(opt.strike_price);
-                const greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, opt.option_type, effectiveVix);
-
-                if (opt.option_type === 'CE') {
-                    item.CE = {
-                        ltp: opt.ltp,
-                        symbol: opt.symbol,
-                        iv: greeks.iv,
-                        delta: greeks.delta,
-                        theta: greeks.theta,
-                        gamma: greeks.gamma,
-                        vega: greeks.vega
-                    };
-                } else if (opt.option_type === 'PE') {
-                    item.PE = {
-                        ltp: opt.ltp,
-                        symbol: opt.symbol,
-                        iv: greeks.iv,
-                        delta: greeks.delta,
-                        theta: greeks.theta,
-                        gamma: greeks.gamma,
-                        vega: greeks.vega
-                    };
-                }
-            });
+    // 5. Process Options
+    const strikeMap = new Map();
+    if (chainRes?.data?.optionsChain) {
+        // Fallback Spot
+        if (!spotPrice || spotPrice === 0) {
+            const mid = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length/2)];
+            spotPrice = mid.strike_price;
+            console.log(`⚠️ Spot estimated from Chain: ${spotPrice}`);
         }
 
-    } catch (e) { 
-        console.error("Option Chain Processing Error:", e.message);
+        chainRes.data.optionsChain.forEach(opt => {
+            if (!strikeMap.has(opt.strike_price)) {
+                strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE: {}, PE: {} });
+            }
+            const item = strikeMap.get(opt.strike_price);
+            const greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, opt.option_type, effectiveVix);
+            
+            if (opt.option_type === 'CE') item.CE = { ltp: opt.ltp, symbol: opt.symbol, ...greeks };
+            else item.PE = { ltp: opt.ltp, symbol: opt.symbol, ...greeks };
+        });
+        
+        optionsList = Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike);
     }
 
     return {
         symbol: userFriendlyKey,
         fyersSymbol: underlyingSymbolFyers,
         spot: spotPrice,
-        vix: effectiveVix, 
+        vix: effectiveVix,
         daysToExpiry: daysToExpiry,
-        options: Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike),
-        lotSize: lotSize 
+        options: optionsList,
+        lotSize: lotSize
     };
 }
-
 // ==================================================================
 // 9. API ROUTES
 // ==================================================================
