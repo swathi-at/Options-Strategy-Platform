@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path'); 
 const readline = require('readline'); 
 const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
-const { calculateStrategy } = require('./strategyengine'); 
+const { calculateStrategy } = require('./strategyCalculator'); 
 const { WebSocketServer } = require('ws');
 
 const app = express();
@@ -24,6 +24,10 @@ app.use(express.json());
 const liveDataCache = {}; 
 const CACHE_DURATION_MS = 20 * 1000; 
 const LOG_FILE_PATH = path.join(__dirname, 'trade_logs.csv');
+// ⚠️ SIMULATION CONTROL ⚠️
+// Set to 'PAPER' to test with Live Data but Fake Money.
+// Set to 'LIVE' to send real orders to Fyers.
+const TRADE_MODE = 'PAPER';
 
 const FYERS_APP_ID = process.env.FYERS_CLIENT_ID;
 const FYERS_SECRET_KEY = process.env.FYERS_SECRET_KEY;
@@ -71,10 +75,26 @@ function getEncodedString(string) {
 
 function logTradeToCSV(tradeData) {
     const headers = "Date,StartTime,EndTime,Instrument,Signal,Strategy,SpotPrice,Strike,EntryPrice,ExitPrice,PnL,Reason\n";
+    
+    // Create file if it doesn't exist
     if (!fs.existsSync(LOG_FILE_PATH)) {
         fs.writeFileSync(LOG_FILE_PATH, headers);
     }
-    const row = `${new Date().toLocaleDateString()},${tradeData.startTime},${tradeData.endTime},${tradeData.instrument},${tradeData.signal},${tradeData.strategy},${tradeData.spot},${tradeData.strike},${tradeData.buyPrice.toFixed(2)},${tradeData.exitPrice.toFixed(2)},${tradeData.pnl.toFixed(2)},${tradeData.reason}\n`;
+
+    // ✅ FIX: Use safety checks (|| 'N/A') to prevent 'undefined'
+    const row = `${new Date().toLocaleDateString()},` +
+                `${tradeData.startTime || new Date().toLocaleTimeString()},` + // Fallback to current time if missing
+                `${tradeData.endTime || new Date().toLocaleTimeString()},` +
+                `${tradeData.instrument},` +
+                `${tradeData.signal || 'N/A'},` +      // Signal (Bull/Bear)
+                `${tradeData.strategy},` +
+                `${tradeData.spot || 0},` +            // Spot Price
+                `${tradeData.strike},` +
+                `${Number(tradeData.buyPrice).toFixed(2)},` +
+                `${Number(tradeData.exitPrice).toFixed(2)},` +
+                `${Number(tradeData.pnl).toFixed(2)},` +
+                `${tradeData.reason || 'Auto-Exit'}\n`;
+
     fs.appendFileSync(LOG_FILE_PATH, row);
     console.log("📝 Trade Logged to CSV:", row.trim());
 }
@@ -360,103 +380,187 @@ function putCreditSpread(sellPut, buyPut) {
     };
 }
 
-// --- SELECTOR FUNCTION (Team Lead Structure + Safety Patches) ---
+// ==================================================================
+// 🧠 TEAM LEAD'S ROBUST STRIKE SELECTION ENGINE (CLEAN VERSION)
+// ==================================================================
+
+// 1. Detect Strike Interval (e.g., 50 for NIFTY, 100 for BANKNIFTY)
+function detectIntervalFromChain(chain) {
+    const strikes = chain.map(c => c.strike).sort((a,b)=>a-b);
+    const diffs = [];
+    for (let i = 1; i < strikes.length; i++) {
+        const d = Math.abs(strikes[i] - strikes[i-1]);
+        if (d > 0) diffs.push(d);
+    }
+    return diffs.length ? Math.min(...diffs) : 50;
+}
+
+// 2. Round Target to Nearest Grid Step
+function roundToNearestStrike(target, interval) {
+    return Math.round(target / interval) * interval;
+}
+
+// 3. Helper: Choose Strike by Delta (Fallback)
+function chooseByDelta(chain, side, targetDelta, atmIndex) {
+    let best = null;
+    let minDiff = Infinity;
+    
+    // Search reasonable window around ATM
+    const start = Math.max(0, atmIndex - 15);
+    const end = Math.min(chain.length - 1, atmIndex + 15);
+
+    for(let i=start; i<=end; i++) {
+        const node = chain[i];
+        const leg = side === 'CE' ? node.CE : node.PE;
+        if (leg && leg.delta) {
+            const diff = Math.abs(Math.abs(leg.delta) - targetDelta);
+            if (diff < minDiff) {
+                minDiff = diff;
+                best = node;
+            }
+        }
+    }
+    return best;
+}
+
+// 4. Advanced Strike Chooser (Prefers Liquidity & OI)
+function chooseStrikeWithPreferences(chain, roundedTarget, side='PE', atmIndex=null, windowSteps=12) {
+    const strikes = chain.map(c => c.strike);
+    let nearestIndex = strikes.findIndex(s => s === roundedTarget);
+    
+    if (nearestIndex === -1) {
+        let minD = Infinity;
+        for (let i = 0; i < strikes.length; i++) {
+            const d = Math.abs(strikes[i] - roundedTarget);
+            if (d < minD) { minD = d; nearestIndex = i; }
+        }
+    }
+
+    const start = Math.max(0, nearestIndex - windowSteps);
+    const end = Math.min(chain.length - 1, nearestIndex + windowSteps);
+    const cand = [];
+
+    for (let i = start; i <= end; i++) {
+        const node = chain[i];
+        const leg = (side === 'CE') ? node.CE : node.PE;
+        
+        if (!leg || typeof leg.ltp === 'undefined' || leg.ltp <= 0) continue;
+
+        // Score = OI + (Bonus for being near optimal Delta 0.15)
+        const oi = Math.abs(leg.oi || 0); 
+        const deltaAbs = Math.abs(leg.delta || 0);
+        const score = oi + (1 - Math.abs(deltaAbs - 0.15)) * 100; 
+        cand.push({ node, idx: i, score });
+    }
+
+    if (cand.length === 0) return null;
+
+    cand.sort((a,b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return Math.abs(a.node.strike - roundedTarget) - Math.abs(b.node.strike - roundedTarget);
+    });
+
+    return cand[0].node;
+}
+
+// 5. THE CORE LOGIC (Team Lead's Implementation)
+function improvedStrikeSelection(chain, spot, dte) {
+    const interval = detectIntervalFromChain(chain);
+    
+    // Find ATM
+    let atmNode = chain[0];
+    let minDiff = Infinity;
+    chain.forEach(c => {
+        const d = Math.abs(c.strike - spot);
+        if(d < minDiff) { minDiff = d; atmNode = c; }
+    });
+    const atmIndex = chain.findIndex(x => x.strike === atmNode.strike);
+
+    const atmIV = (atmNode && (atmNode.CE?.iv || atmNode.PE?.iv)) ? (atmNode.CE?.iv || atmNode.PE?.iv) : 15;
+    
+    const t = (dte < 1 ? 1 : dte) / 365;
+    const em = spot * (atmIV / 100) * Math.sqrt(t);
+
+    const lowerRaw = spot - em;
+    const upperRaw = spot + em;
+    const lowerRounded = roundToNearestStrike(lowerRaw, interval);
+    const upperRounded = roundToNearestStrike(upperRaw, interval);
+
+    console.log(`🎯 TARGETS: Lower ${lowerRounded} | Upper ${upperRounded} (Interval: ${interval})`);
+
+    let sellPut = chooseStrikeWithPreferences(chain, lowerRounded, 'PE', atmIndex);
+    let sellCall = chooseStrikeWithPreferences(chain, upperRounded, 'CE', atmIndex);
+
+    if (!sellPut) sellPut = chooseByDelta(chain, 'PE', 0.16, atmIndex) || chain[Math.max(0, atmIndex - 2)];
+    if (!sellCall) sellCall = chooseByDelta(chain, 'CE', 0.16, atmIndex) || chain[Math.min(chain.length - 1, atmIndex + 2)];
+
+    if (sellPut.strike >= sellCall.strike) {
+        const fallbackLower = chain[Math.max(0, atmIndex - 4)] || chain[0];
+        const fallbackUpper = chain[Math.min(chain.length - 1, atmIndex + 4)] || chain[chain.length-1];
+        if (fallbackLower.strike < fallbackUpper.strike) {
+            sellPut = fallbackLower;
+            sellCall = fallbackUpper;
+        }
+    }
+
+    const sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
+    const sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
+    const buyPut = chain[Math.max(0, sellPutIndex - 2)] || chain[sellPutIndex];
+    const buyCall = chain[Math.min(chain.length - 1, sellCallIndex + 2)] || chain[sellCallIndex];
+
+    return { atmNode, atmIndex, interval, sellPut, buyPut, sellCall, buyCall, expectedMove: Math.round(em) };
+}
+
+// 6. MAIN SELECTOR WRAPPER
 function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
-    console.log(`🔍 DEBUG SPOT CHECK: The Bot thinks Spot is: ${spot}`);
+    if (!spot || chain.length < 5) return { error: "Insufficient data for strategy." };
 
-    // [PATCH 1] Critical Safety Check for Spot Price
-    if (!spot || spot === 0 || isNaN(spot)) {
-        console.error("❌ CRITICAL: Invalid Spot Price detected:", spot);
-        return { error: "Invalid Spot Price (0 or null). Cannot calculate targets." };
-    }
+    const picks = improvedStrikeSelection(chain, spot, dte);
+    const { atmNode, atmIndex, sellPut, buyPut, sellCall, buyCall, expectedMove } = picks;
 
-    chain = chain.filter(c => 
-        c?.CE && c?.PE &&          // Must have CE and PE objects
-        c.strike > 0               // Must have a real strike price (Removes -1)
-    );
-    if (chain.length > 0) {
-        console.log(`📊 CHAIN RANGE: ${chain[0].strike} to ${chain[chain.length-1].strike} (Total: ${chain.length})`);
-    }
-    if (chain.length < 5) {
-        return { error: "Option chain too small, cannot build strategy." };
-    }
-
-    // 2. Detect ATM
-    const atm = detectATM(chain, spot);
-    const atmIndex = chain.findIndex(x => x.strike === atm.strike);
-
-    // Ensure ATM index is valid
-    if (atmIndex < 2 || atmIndex > chain.length - 3) {
-        return { error: "ATM index out of range. Try another expiry." };
-    }
-
-    // 3. Expected Move logic (Your Math is Verified Correct)
-    const iv = atm.CE.iv || atm.PE.iv || 0.12;
-    const em = expectedMove(spot, iv, dte);
-
-    const lowerTarget = spot - em;
-    const upperTarget = spot + em;
-
-    // 4. Choose closest valid strikes
-    let sellPut = chooseClosest(chain, lowerTarget);
-    let sellCall = chooseClosest(chain, upperTarget);
-
-    // Validate SELL PUT / CALL
-    if (!sellPut?.PE || !sellCall?.CE) {
-        // fallback to ATM ± 2
-        sellPut = chain[atmIndex - 2];
-        sellCall = chain[atmIndex + 2];
-    }
-
-    // [PATCH 2] Prevent Wash Trades (Buying & Selling same strike)
-    let sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
-    let sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
-
-    if (sellPutIndex === 0) { sellPutIndex = 1; sellPut = chain[sellPutIndex]; }
-    if (sellCallIndex === chain.length - 1) { sellCallIndex = chain.length - 2; sellCall = chain[sellCallIndex]; }
-
-    // 5. BUY wings (safe indexing)
-    const buyPut = chain[sellPutIndex - 1]; 
-    const buyCall = chain[sellCallIndex + 1];
-
-    if (!buyPut?.PE || !buyCall?.CE) {
-        return { error: "Could not find safe wing strikes. Narrow option chain." };
-    }
-
-    // 6. Build strategy list
     const strategies = [];
 
-    strategies.push(shortStraddle(chain, atm));             // 0
-    strategies.push(shortStrangle(sellPut, sellCall));      // 1
-    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall)); // 2
-    strategies.push(ironButterfly(chain, atmIndex));        // 3
-    strategies.push(jadeLizard(sellPut, sellCall, buyCall)); // 4
+    // Neutral
+    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall));
+    strategies.push(shortStraddle(chain, atmNode));
+    strategies.push(shortStrangle(sellPut, sellCall));
     
-    strategies.push(putCreditSpread(sellPut, buyPut));      // 5
-    strategies.push(bullCallSpread(atm, sellCall));         // 6 
+    // Iron Butterfly Wings logic
+    const ibBuyPut = chain[Math.max(0, atmIndex - 3)] || buyPut;
+    const ibBuyCall = chain[Math.min(chain.length - 1, atmIndex + 3)] || buyCall;
+    strategies.push(ironButterfly(chain, atmIndex, ibBuyPut, ibBuyCall));
 
-    strategies.push(bearCallSpread(sellCall, buyCall));     // 7
-    strategies.push(bearPutSpread(atm, sellPut));           // 8 
+    // Bullish
+    strategies.push(putCreditSpread(sellPut, buyPut));
+    strategies.push(bullCallSpread(atmNode, sellCall));
+    strategies.push(jadeLizard(sellPut, sellCall, buyCall));
 
-    // [PATCH 3] Dynamic Selection based on Frontend Signal
+    // Bearish
+    strategies.push(bearCallSpread(sellCall, buyCall));
+    strategies.push(bearPutSpread(atmNode, sellPut));
+
     let chosenStrategy;
     if (signal === "BULL") {
-        chosenStrategy = strategies[5]; // Put Credit Spread
+        chosenStrategy = strategies.find(s => s.name === "Put Credit Spread"); 
     } else if (signal === "BEAR") {
-        chosenStrategy = strategies[7]; // Bear Call Spread
+        chosenStrategy = strategies.find(s => s.name === "Bear Call Spread");
     } else {
-        chosenStrategy = strategies[2]; // Iron Condor (Default Neutral)
+        if (dte <= 1) {
+            chosenStrategy = strategies.find(s => s.name === "Iron Butterfly") || strategies[0];
+        } else {
+            chosenStrategy = strategies.find(s => s.name === "Iron Condor");
+        }
     }
 
     return {
         spot,
-        atmStrike: atm.strike,
-        expectedMove: Math.round(em),
+        atmStrike: atmNode.strike,
+        expectedMove: expectedMove,
         sellPut: sellPut.strike,
         buyPut: buyPut.strike,
         sellCall: sellCall.strike,
         buyCall: buyCall.strike,
-        chosenStrategy: chosenStrategy, 
+        chosenStrategy,
         strategies
     };
 }
@@ -747,7 +851,7 @@ async function fetchMarketDataWithGreeks(symbol) {
         vix: effectiveVix,
         daysToExpiry: daysToExpiry,
         options: optionsList,
-        lotSize: lotSize
+        lotSize: lotSize,
     };
 }
 // ==================================================================
@@ -795,7 +899,9 @@ app.post('/api/decide-and-build-order', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
 });
 
-// --- UPDATED EXECUTE TRADE FUNCTION (MULTI-LEG SUPPORT) ---
+// ==================================================================
+// 🚀 TRADE EXECUTION ROUTE (LIVE + PAPER SUPPORT)
+// ==================================================================
 app.post('/api/execute-trade', async (req, res) => {
     // 1. Auth Check
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
@@ -808,92 +914,120 @@ app.post('/api/execute-trade', async (req, res) => {
             return res.status(400).json({ error: "Invalid trade data: No legs found." });
         }
 
-        console.log(`🚀 Executing Strategy: ${strategy} (${decisionData.legs.length} Legs)`);
+        console.log(`\n🚀 Executing Strategy: ${strategy} (${decisionData.legs.length} Legs)`);
+        console.log(`📊 Execution Mode: ${TRADE_MODE}`); // Defined at top of file
 
-        // 3. Prepare to track results for all legs
         const executedLegs = [];
         const errors = [];
 
-        // 4. LOOP THROUGH ALL LEGS
+        // OPTIMIZATION: Fetch Market Data ONCE if needed for symbol resolution
+        // (Instead of fetching inside the loop 4 times)
+        let fallbackMarketData = null;
+        const needsFallback = decisionData.legs.some(l => !l.symbol && !l.greeks?.symbol);
+        
+        if (needsFallback) {
+            console.log("🔍 Some symbols missing. Fetching live option chain for resolution...");
+            fallbackMarketData = await fetchMarketDataWithGreeks(algoState.symbol);
+        }
+
+        // 3. LOOP THROUGH LEGS
         for (const leg of decisionData.legs) {
             try {
-                // --- A. Resolve Symbol for THIS specific leg ---
-                let actualSymbol = leg.greeks?.symbol; // Try Sensibull structure first
+                // --- A. Resolve Symbol ---
+                let actualSymbol = leg.symbol || leg.greeks?.symbol; 
+
+                // Fallback Logic
+                if (!actualSymbol && fallbackMarketData) {
+                    const opt = fallbackMarketData.options.find(o => o.strike === Number(leg.strike));
+                    if (opt) {
+                        const type = leg.type || leg.optionType;
+                        actualSymbol = (type === 'CE') ? opt.CE?.symbol : opt.PE?.symbol;
+                    }
+                }
+
+                if (!actualSymbol) throw new Error(`Could not resolve symbol for Strike ${leg.strike}`);
+
+                // --- B. Calculate Quantity ---
+                // leg.qty is usually 'Lots' from the strategy engine.
+                // We multiply by Lot Size (e.g. 1 lot * 75 = 75 qty)
+                const quantity = (leg.qty || 1) * (algoState.lotSize || 1); 
+                const entryPrice = leg.price || leg.greeks?.ltp || 0;
+
+                console.log(`👉 [${leg.action}] ${quantity}x ${actualSymbol} @ ₹${entryPrice}`);
+
+                // --- C. EXECUTE BASED ON MODE ---
+                let orderId = `SIM-${Date.now()}-${Math.floor(Math.random()*1000)}`; // Default ID
+
+                if (TRADE_MODE === 'LIVE') {
+                    // 🔴 LIVE EXECUTION (Real Money)
+                    const fyers = new fyersModel();
+                    fyers.setAppId(fyersAppId);
+                    fyers.setAccessToken(fyersAccessToken);
+
+                    const orderReq = {
+                        symbol: actualSymbol,
+                        qty: quantity,
+                        type: 2, // Market Order
+                        side: leg.action === 'BUY' ? 1 : -1,
+                        productType: "MARGIN", // Intraday/Margin
+                        limitPrice: 0,
+                        stopPrice: 0,
+                        validity: "DAY",
+                        disclosedQty: 0,
+                        offlineOrder: false,
+                    };
+
+                    const response = await fyers.place_order(orderReq);
+                    if (response.s !== 'ok') throw new Error(response.message || "Order Failed");
+                    
+                    orderId = response.id;
+                    console.log(`✅ LIVE ORDER PLACED. ID: ${orderId}`);
                 
-                if (!actualSymbol) actualSymbol = leg.symbol; // Try root structure
-
-                // Fallback: Fetch live chain if symbol is missing
-                if (!actualSymbol) {
-                     console.log(`🔍 Resolving Symbol for Strike ${leg.strike} (${leg.type || leg.optionType})...`);
-                     // Note: We use algoState.symbol (Underlying) to fetch the chain
-                     const marketData = await fetchMarketDataWithGreeks(algoState.symbol); 
-                     const opt = marketData.options.find(o => o.strike === Number(leg.strike));
-                     
-                     if (opt) {
-                         const type = leg.type || leg.optionType; 
-                         if (type === 'CE') actualSymbol = opt.CE?.symbol || opt.CE_Symbol;
-                         else if (type === 'PE') actualSymbol = opt.PE?.symbol || opt.PE_Symbol;
-                     }
+                } else {
+                    // 🟢 PAPER EXECUTION
+                    console.log(`✅ SIMULATION SUCCESS. ID: ${orderId}`);
                 }
 
-                if (!actualSymbol) {
-                    throw new Error(`Could not resolve trading symbol for Strike ${leg.strike}`);
-                }
-
-                // --- B. Execute (Simulation or Live) ---
-                const entryPrice = leg.price || 100; // Mock price if 0
-                const quantity = (leg.qty || 1) * (algoState.lotSize || 1); // Respect Lot Size if needed
-
-                console.log(`[EXECUTION] ${leg.action} ${quantity} ${actualSymbol} @ ~${entryPrice}`);
-
-                // --- LIVE ORDER CALL (Uncomment to go live) ---
-                // const side = leg.action === 'BUY' ? 1 : -1;
-                // const orderRes = await placeLiveOrder(actualSymbol, quantity, side);
-                // console.log("Order ID:", orderRes.id);
-
-                // --- SIMULATION RECORD ---
+                // --- D. RECORD POSITION (For P&L Tracking) ---
                 const newPosition = {
+                    orderId: orderId,
                     instrument: actualSymbol,
-                    buyPrice: entryPrice, // For simulation, we assume fill at current LTP
-                    qty: quantity, 
-                    // Stop Loss / Target logic per leg (or manage globally)
-                    stopLossPrice: entryPrice * 0.80, 
-                    targetPrice: entryPrice * 1.10,
-                    startTime: new Date().toLocaleTimeString(),
-                    signal: decisionData.signal || 'MANUAL',
+                    buyPrice: entryPrice,
+                    qty: quantity,
+                    action: leg.action,
                     strategy: strategy,
-                    spot: decisionData.spot, 
                     strike: leg.strike,
                     type: leg.type || leg.optionType,
-                    action: leg.action
+                    timestamp: new Date(),
+                    pnl: 0 // Will be updated by P&L monitor
                 };
 
                 executedLegs.push(newPosition);
 
             } catch (legError) {
-                console.error(`❌ Failed to execute leg ${leg.strike}:`, legError.message);
+                console.error(`❌ Leg Failed (${leg.strike}):`, legError.message);
                 errors.push({ strike: leg.strike, error: legError.message });
             }
         }
 
-        // 5. Update Global State (Store all new positions)
+        // 4. Update Global Portfolio
         if (executedLegs.length > 0) {
-            livePositions = [...livePositions, ...executedLegs]; // Add to existing portfolio
+            livePositions = [...livePositions, ...executedLegs];
             algoState.isInTrade = true;
-            
+
             res.json({ 
                 success: true, 
-                message: `Executed ${executedLegs.length} / ${decisionData.legs.length} legs.`, 
+                message: `Executed ${executedLegs.length} legs (${TRADE_MODE}).`, 
                 positions: executedLegs,
                 errors: errors.length > 0 ? errors : null
             });
         } else {
-            res.status(500).json({ error: "All legs failed to execute.", details: errors });
+            res.status(500).json({ error: "All legs failed.", details: errors });
         }
 
     } catch (error) {
         console.error("Critical Execution Error:", error.message);
-        res.status(500).json({ error: "Execution Logic Failed", details: error.message });
+        res.status(500).json({ error: "Execution Failed", details: error.message });
     }
 });
 
@@ -901,45 +1035,37 @@ app.post('/calculate', async (req, res) => {
     try {
         const { strategy, strike, strike1, strike2, stockPrice, symbol, lotSize } = req.body;
         
-        const s = Number(strike) || 0;
-        const s1 = Number(strike1) || 0;
-        const s2 = Number(strike2) || 0;
-        const sp = Number(stockPrice) || 0;
-        const referenceStrike = s || s1 || s2 || sp;
-        
-        if (!referenceStrike) return res.status(400).json({ error: 'Valid strike required.' });
+        // 1. Prepare Parameters
+        const params = { ...req.body };
 
-        const spotPrices = [];
-        for (let i = referenceStrike * 0.85; i <= referenceStrike * 1.15; i += referenceStrike * 0.01) {
-            spotPrices.push(Math.round(i));
-        }
-        
-        const params = { ...req.body, spotPrices };
-        
-        // --- DYNAMIC LOT SIZE LOGIC (VIA CSV OR FALLBACK) ---
+        // 2. --- DYNAMIC LOT SIZE LOGIC ---
+        // If frontend didn't provide a valid lot size, look it up on the backend
         if (symbol && (!lotSize || Number(lotSize) === 1)) {
-            // Check global map first (Populated by CSV)
             const liveSize = getLotSizeForSymbol(symbol);
+            
             if (liveSize && liveSize > 1) {
                 params.lotSize = liveSize;
                 console.log(`✅ Using Global/CSV Lot Size for ${symbol}: ${liveSize}`);
             } else {
-                console.log(`⚠️ No CSV data. Checking fallback...`);
-                // Check fallback map
-                if (FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[symbol.replace('NSE:', '')]) {
-                     params.lotSize = FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[symbol.replace('NSE:', '')];
-                     console.log(`✅ Applied Fallback from Route: ${params.lotSize}`);
+                // Fallback Logic
+                const cleanSymbol = symbol.replace('NSE:', '').replace('BSE:', '');
+                if (FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[cleanSymbol]) {
+                    params.lotSize = FALLBACK_LOT_SIZES[symbol] || FALLBACK_LOT_SIZES[cleanSymbol];
+                    console.log(`✅ Applied Fallback Lot Size: ${params.lotSize}`);
                 } else {
-                     params.lotSize = 1;
+                    params.lotSize = 1;
                 }
             }
         } else if (!params.lotSize) {
              params.lotSize = 1; 
         }
-        // --- END DYNAMIC LOT SIZE LOGIC ---
+        // ---------------------------------
 
+        // 3. Call the New Calculator Engine
+        // Note: We don't need to generate spotPrices[] anymore; the engine does it.
         const result = calculateStrategy(strategy, params);
         
+        // 4. Format Output for Frontend
         if (Array.isArray(result.breakeven)) {
             result.breakeven = result.breakeven.map(n => n.toFixed(2)).join(' & ');
         } else if (typeof result.breakeven === 'number') {
@@ -947,7 +1073,7 @@ app.post('/calculate', async (req, res) => {
         }
         
         result.usedLotSize = params.lotSize; 
-        
+
         res.json(result);
 
     } catch (error) { 

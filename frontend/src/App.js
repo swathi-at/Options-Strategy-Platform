@@ -55,46 +55,40 @@ const LiveCandleChart = ({ data }) => {
     );
 };
 
-// --- STRATEGY DEFINITIONS ---
+// --- STRATEGY DEFINITIONS (Matches strategyCalculator.js) ---
 const strategyGroups = [
     {
         label: "Bullish Strategies",
         options: [
-            { value: 'long-call', name: 'Long Call', fields: ['strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'bull-call-spread', name: 'Bull Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'bull-put-spread', name: 'Bull Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
+            { value: 'long-call', name: 'Long Call', fields: ['strike', 'premium', 'lots', 'lotSize'] },
+            { value: 'bull-call-spread', name: 'Bull Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'bull-put-spread', name: 'Bull Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'call-ratio-spread', name: 'Call Ratio Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] }, // New
         ]
     },
     {
         label: "Bearish Strategies",
         options: [
-            { value: 'long-put', name: 'Long Put', fields: ['strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'bear-put-spread', name: 'Bear Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'bear-call-spread', name: 'Bear Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
+            { value: 'long-put', name: 'Long Put', fields: ['strike', 'premium', 'lots', 'lotSize'] },
+            { value: 'bear-put-spread', name: 'Bear Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'bear-call-spread', name: 'Bear Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
         ]
     },
     {
-        label: "Neutral Strategies",
+        label: "Neutral / Volatility",
         options: [
-            { value: 'long-straddle', name: 'Long Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'short-straddle', name: 'Short Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'long-strangle', name: 'Long Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'short-strangle', name: 'Short Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'premium3', 'strike3', 'premium4', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'calendar-spread', name: 'Calendar Spread', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
+            { value: 'short-straddle', name: 'Short Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
+            { value: 'short-strangle', name: 'Short Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize'] },
+            { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'premium3', 'strike3', 'premium4', 'lots', 'lotSize'] },
         ]
     },
     {
-        label: "Other Strategies",
+        label: "Hedging & Synthetic",
         options: [
-            { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'short-put', name: 'Short Put', fields: ['strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'synthetic-long-stock', name: 'Synthetic Long Stock', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
-            { value: 'synthetic-short-stock', name: 'Synthetic Short Stock', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize', 'targetPercent', 'slPercent'] },
+            { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
+            { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
+            { value: 'synthetic-long-stock', name: 'Synthetic Long', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
         ]
     }
 ];
@@ -294,40 +288,87 @@ function App() {
     }, []);
 
     // --- PREMIUM AUTO-FILLER (UPDATED FOR NESTED STRUCTURE) ---
+    // --- AUTO-FILL PREMIUMS FROM LIVE DATA ---
     const updateAllPremiums = useCallback((currentForm, currentStrategy, currentSymbolData) => {
-        if (!currentSymbolData || !currentSymbolData.options || currentSymbolData.options.length === 0) return currentForm;
+        // 1. Safety Checks
+        if (!currentSymbolData || !currentSymbolData.options) return currentForm;
         
         const newForm = { ...currentForm };
+        
+        // 2. Helper to find price in the Chain
         const findPrice = (strike, type) => {
             if (!strike) return '';
+            // Match strike (Handle string/number mismatch)
             const opt = currentSymbolData.options.find(o => o.strike === Number(strike));
-            // Correctly accessing the nested structure: opt.CE.ltp or opt.PE.ltp
-            return opt ? ((type === 'CE') ? opt.CE?.ltp : opt.PE?.ltp) : '';
+            
+            if (!opt) return ''; // Strike not found in chain
+            
+            // Return LTP from the nested object
+            if (type === 'CE') return opt.CE?.ltp || 0;
+            if (type === 'PE') return opt.PE?.ltp || 0;
+            return 0;
         };
 
-        if (['long-call', 'short-call', 'protective-call', 'synthetic-long-stock', 'synthetic-short-stock'].includes(currentStrategy)) {
-            newForm.premium = findPrice(newForm.strike, 'CE');
-            if(currentStrategy.includes('synthetic')) newForm.premium2 = findPrice(newForm.strike, 'PE');
-        } 
-        else if (['long-put', 'short-put', 'protective-put'].includes(currentStrategy)) {
-            newForm.premium = findPrice(newForm.strike, 'PE');
+        // 3. Auto-fill Underlying Price for Stock strategies
+        if (currentStrategy.includes('protective') && currentSymbolData.spot) {
+            newForm.stockPrice = currentSymbolData.spot;
         }
-        else if (['bull-call-spread', 'bear-call-spread'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'CE'); newForm.premium2 = findPrice(newForm.strike2, 'CE');
-        } 
-        else if (['bull-put-spread', 'bear-put-spread'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'PE');
-        } 
-        else if (['long-straddle', 'short-straddle', 'calendar-spread'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike, 'CE'); newForm.premium2 = findPrice(newForm.strike, 'PE');
-            if(currentStrategy === 'calendar-spread') newForm.premium2 = findPrice(newForm.strike, 'CE'); 
-        } 
-        else if (['long-strangle', 'short-strangle'].includes(currentStrategy)) {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'CE');
-        }
-        else if (currentStrategy === 'iron-condor') {
-            newForm.premium1 = findPrice(newForm.strike1, 'PE'); newForm.premium2 = findPrice(newForm.strike2, 'PE');
-            newForm.premium3 = findPrice(newForm.strike3, 'CE'); newForm.premium4 = findPrice(newForm.strike4, 'CE');
+
+        // 4. Map Fields based on Strategy
+        switch (currentStrategy) {
+            // Single Leg
+            case 'long-call': case 'short-call':
+                newForm.premium = findPrice(newForm.strike, 'CE'); break;
+            case 'long-put': case 'short-put':
+                newForm.premium = findPrice(newForm.strike, 'PE'); break;
+            
+            // Protective / Stock
+            case 'protective-put': 
+                newForm.premium = findPrice(newForm.strike, 'PE'); break;
+            case 'protective-call': 
+                newForm.premium = findPrice(newForm.strike, 'CE'); break;
+
+            // Spreads
+            case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
+                newForm.premium1 = findPrice(newForm.strike1, 'CE'); 
+                newForm.premium2 = findPrice(newForm.strike2, 'CE'); 
+                break;
+            case 'bull-put-spread': case 'bear-put-spread':
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
+                break;
+
+            // Neutral (Mixed CE/PE)
+            case 'short-straddle': case 'long-straddle': case 'synthetic-long-stock': case 'synthetic-short-stock':
+                newForm.premium1 = findPrice(newForm.strike, 'CE'); 
+                newForm.premium2 = findPrice(newForm.strike, 'PE'); 
+                // For synthetics, usually premium is Call, premium2 is Put
+                if(currentStrategy === 'synthetic-long-stock') { 
+                    newForm.premium = findPrice(newForm.strike, 'CE'); 
+                    newForm.premium2 = findPrice(newForm.strike, 'PE'); 
+                }
+                break;
+
+            case 'short-strangle': case 'long-strangle':
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Lower Strike Put
+                newForm.premium2 = findPrice(newForm.strike2, 'CE'); // Higher Strike Call
+                break;
+
+            case 'iron-condor':
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Buy Put
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); // Sell Put
+                newForm.premium3 = findPrice(newForm.strike3, 'CE'); // Sell Call
+                newForm.premium4 = findPrice(newForm.strike4, 'CE'); // Buy Call
+                break;
+            
+            case 'iron-butterfly':
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Buy Put
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); // Sell Put (ATM)
+                newForm.premium3 = findPrice(newForm.strike2, 'CE'); // Sell Call (ATM)
+                newForm.premium4 = findPrice(newForm.strike3, 'CE'); // Buy Call
+                break;
+
+            default: break;
         }
         return newForm;
     }, []);
@@ -584,15 +625,61 @@ function App() {
                         {/* DECISION & PNL DISPLAY */}
                         <div className="space-y-2 mt-4">
                             {decisionResult && (
-                                <div className="p-3 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
-                                    <div className="flex justify-between items-center mb-1">
-                                        <span className={`font-bold px-2 py-0.5 rounded text-xs ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                <div className="p-4 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
+                                    {/* Header: Decision & Score */}
+                                    <div className="flex justify-between items-center mb-3 border-b border-gray-100 dark:border-gray-700 pb-2">
+                                        <span className={`font-bold px-2 py-1 rounded text-xs uppercase ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                             {decisionResult.decision}
                                         </span>
-                                        <span className="text-xs text-gray-500">Score: {decisionResult.score || 0}</span>
+                                        <div className="text-right">
+                                            <span className="text-xs text-gray-500 block">Score: {decisionResult.score || 0}</span>
+                                            {/* Show Expiry Info if available */}
+                                            {liveData && liveData.daysToExpiry !== undefined && (
+                                                <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
+                                                    Expiry: {liveData.expiryDate || 'N/A'} ({liveData.daysToExpiry} Days)
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
-                                    {decisionResult.strategy && <p className="font-semibold text-gray-800 dark:text-gray-100">{decisionResult.strategy}</p>}
-                                    {decisionResult.decision === 'SKIP' && <p className="text-red-500">{decisionResult.reason}</p>}
+
+                                    {/* Strategy Name */}
+                                    {decisionResult.strategy && (
+                                        <p className="font-bold text-lg text-gray-800 dark:text-gray-100 mb-2">
+                                            {decisionResult.strategy}
+                                        </p>
+                                    )}
+
+                                    {/* --- NEW: STRIKE PRICE BREAKDOWN --- */}
+                                    {decisionResult.legs && decisionResult.legs.length > 0 ? (
+                                        <div className="bg-gray-50 dark:bg-gray-700/50 rounded p-2 mb-2">
+                                            <p className="text-xs font-bold text-gray-500 mb-1 uppercase tracking-wide">Selected Strikes</p>
+                                            <div className="grid grid-cols-1 gap-1">
+                                                {decisionResult.legs.map((leg, idx) => (
+                                                    <div key={idx} className="flex justify-between items-center bg-white dark:bg-gray-800 px-2 py-1 rounded border dark:border-gray-600">
+                                                        <span className={`text-xs font-bold w-12 ${leg.action === 'BUY' ? 'text-green-600' : 'text-red-500'}`}>
+                                                            {leg.action}
+                                                        </span>
+                                                        <span className="text-xs font-mono font-medium text-gray-700 dark:text-gray-200 flex-1 text-center">
+                                                            {leg.strike} {leg.optionType || leg.type}
+                                                        </span>
+                                                        <span className="text-xs text-gray-400 w-16 text-right">
+                                                            ₹{leg.price || leg.greeks?.ltp || '?'}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        decisionResult.decision === 'SKIP' && <p className="text-red-500 italic text-xs">{decisionResult.reason}</p>
+                                    )}
+                                    
+                                    {/* Expected Move Info */}
+                                    {decisionResult.expectedMove && (
+                                        <div className="mt-2 text-xs text-gray-500 flex justify-between border-t dark:border-gray-700 pt-2">
+                                            <span>Spot: {decisionResult.spot}</span>
+                                            <span>Expected Move: ±{decisionResult.expectedMove}</span>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
