@@ -14,6 +14,7 @@ const { fyersModel, fyersDataSocket } = require("fyers-api-v3");
 const { calculateStrategy } = require('./strategyCalculator'); 
 const { WebSocketServer } = require('ws');
 
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -1028,6 +1029,23 @@ app.post('/api/execute-trade', async (req, res) => {
     } catch (error) {
         console.error("Critical Execution Error:", error.message);
         res.status(500).json({ error: "Execution Failed", details: error.message });
+    }
+});
+
+app.post('/api/python-calculation', async (req, res) => {
+    try {
+        const payload = req.body;
+        console.log("🚀 Sending data to Flask Engine...");
+
+        // CALL FLASK (Port 5001)
+        const pythonRes = await axios.post('http://127.0.0.1:5001/calculate-strategy', payload);
+
+        // Return Python's answer to Frontend
+        res.json(pythonRes.data);
+
+    } catch (error) {
+        console.error("❌ Flask Connection Failed:", error.message);
+        res.status(500).json({ error: "Python Engine unavailable" });
     }
 });
 

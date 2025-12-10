@@ -1,0 +1,10 @@
+{
+  "name": "options-strategy-platform",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "concurrently \"cd backend && node server.js\" \"cd frontend && npm start\" \"cd python_engine && python app.py\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

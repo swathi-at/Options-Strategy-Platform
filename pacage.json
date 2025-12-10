@@ -1,0 +1,16 @@
+{
+  "name": "options-strategy-platform",
+  "version": "1.0.0",
+  "description": "Root runner for Backend, Frontend, and Python Engine",
+  "main": "index.js",
+  "scripts": {
+    "start": "concurrently \"cd backend && node server.js\" \"cd frontend && npm start\" \"cd python_engine && python app.py\"",
+    "install-all": "concurrently \"cd backend && npm install\" \"cd frontend && npm install\" \"pip install flask flask-cors\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
