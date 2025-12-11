@@ -63,32 +63,33 @@ const strategyGroups = [
             { value: 'long-call', name: 'Long Call', fields: ['strike', 'premium', 'lots', 'lotSize'] },
             { value: 'bull-call-spread', name: 'Bull Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'bull-put-spread', name: 'Bull Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
-            { value: 'call-ratio-spread', name: 'Call Ratio Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] }, // New
+            { value: 'call-ratio-spread', name: 'Call Ratio Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'jade-lizard', name: 'Jade Lizard', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, // New
+            { value: 'synthetic-long-stock', name: 'Synthetic Long', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
+            { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
         ]
     },
     {
         label: "Bearish Strategies",
         options: [
             { value: 'long-put', name: 'Long Put', fields: ['strike', 'premium', 'lots', 'lotSize'] },
+            { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] }, // Added
             { value: 'bear-put-spread', name: 'Bear Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'bear-call-spread', name: 'Bear Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'synthetic-short-stock', name: 'Synthetic Short', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
+            { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
         ]
     },
     {
         label: "Neutral / Volatility",
         options: [
             { value: 'short-straddle', name: 'Short Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
+            { value: 'long-straddle', name: 'Long Straddle', fields: ['strike', 'premium1', 'premium2', 'lots', 'lotSize'] },
             { value: 'short-strangle', name: 'Short Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
+            { value: 'long-strangle', name: 'Long Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize'] },
             { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'premium3', 'strike3', 'premium4', 'lots', 'lotSize'] },
-        ]
-    },
-    {
-        label: "Hedging & Synthetic",
-        options: [
-            { value: 'protective-put', name: 'Protective Put', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
-            { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
-            { value: 'synthetic-long-stock', name: 'Synthetic Long', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
+            { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, // New
         ]
     }
 ];
@@ -121,10 +122,13 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
 
     try {
         switch (strategy) {
+            // --- SINGLE LEG ---
             case 'long-call': tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots }); break;
-            case 'long-put': tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
             case 'short-call': tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots }); break;
+            case 'long-put': tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
             case 'short-put': tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots }); break;
+
+            // --- SPREADS ---
             case 'bull-call-spread':
                 tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); break;
@@ -137,17 +141,58 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
             case 'bear-put-spread':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots }); break;
+            
+            // --- RATIOS / COMPLEX ---
+            case 'call-ratio-spread':
+                tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots * 2 }); break;
+            case 'jade-lizard':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots }); // OTM Put
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); // OTM Call
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots });  // Far OTM Call
+                break;
+
+            // --- NEUTRAL ---
             case 'long-straddle':
-                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
-                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
-            case 'short-straddle':
-                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
-                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots }); break;
+            case 'short-straddle': // Logic identical, just Action flips (handled in backend if manual trade is simple)
+                // For simplicity in manual builder, we just send both legs.
+                // NOTE: For Short Straddle manual entry, user usually inputs positive premium. 
+                // We map strictly based on strategy name logic here:
+                const actionStraddle = strategy === 'long-straddle' ? 'BUY' : 'SELL';
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: actionStraddle, qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: actionStraddle, qty: lots }); 
+                break;
+            case 'short-strangle':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); break;
+            case 'long-strangle':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'BUY', qty: lots }); break;
+            
+            // --- BUTTERFLIES / CONDORS ---
             case 'iron-condor':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
                 tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'SELL', qty: lots });
                 tradeLegs.push({ strike: form.strike4, optionType: 'CE', action: 'BUY', qty: lots }); break;
+            case 'iron-butterfly':
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); // Same strike for body
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots }); break;
+            case 'call-butterfly':
+                tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots * 2 });
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots }); break;
+
+            // --- SYNTHETICS ---
+            case 'synthetic-long-stock':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots }); break;
+            case 'synthetic-short-stock':
+                tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
+                tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
+
             default: return null;
         }
     } catch (error) {
@@ -176,22 +221,49 @@ const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolK
     const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50;
 
     switch (currentStrategy) {
+        // ATM Strategies
         case 'long-call': case 'long-put': case 'short-call': case 'short-put': 
-        case 'long-straddle': case 'short-straddle': case 'synthetic-long-stock': case 'synthetic-short-stock': case 'calendar-spread':
+        case 'long-straddle': case 'short-straddle': 
+        case 'synthetic-long-stock': case 'synthetic-short-stock': 
+        case 'calendar-spread':
             newForm.strike = atmStrike; break;
-        case 'bull-call-spread': case 'bear-call-spread':
+        
+        // Vertical Spreads (1 step width)
+        case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
             newForm.strike1 = atmStrike; newForm.strike2 = atmStrike + increment; break;
         case 'bull-put-spread': case 'bear-put-spread':
             newForm.strike1 = atmStrike; newForm.strike2 = atmStrike - increment; break;
+        
+        // Strangles (1 step OTM)
         case 'long-strangle': case 'short-strangle':
             newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike + increment; break;
+        
+        // Butterflies (Body at ATM, Wings 1 step out)
         case 'call-butterfly': case 'iron-butterfly':
-            newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike; newForm.strike3 = atmStrike + increment; break;
+            newForm.strike1 = atmStrike - increment; // Lower Wing
+            newForm.strike2 = atmStrike;             // Body
+            newForm.strike3 = atmStrike + increment; // Upper Wing
+            break;
+        
+        // Jade Lizard (Sell OTM Put, Sell OTM Call, Buy Far OTM Call)
+        case 'jade-lizard':
+            newForm.strike1 = atmStrike - increment;       // Sell Put
+            newForm.strike2 = atmStrike + increment;       // Sell Call
+            newForm.strike3 = atmStrike + (2 * increment); // Buy Call
+            break;
+
+        // Iron Condor (Body 1 step OTM, Wings 2 steps OTM)
         case 'iron-condor':
-            newForm.strike1 = atmStrike - (2 * increment); newForm.strike2 = atmStrike - increment;
-            newForm.strike3 = atmStrike + increment; newForm.strike4 = atmStrike + (2 * increment); break;
+            newForm.strike1 = atmStrike - (2 * increment); 
+            newForm.strike2 = atmStrike - increment;
+            newForm.strike3 = atmStrike + increment; 
+            newForm.strike4 = atmStrike + (2 * increment); 
+            break;
+        
+        // Stock Strategies
         case 'protective-put': case 'protective-call':
             newForm.stockPrice = atmStrike; newForm.strike = atmStrike; break;
+            
         default: break;
     }
     return newForm;
@@ -290,83 +362,81 @@ function App() {
     // --- PREMIUM AUTO-FILLER (UPDATED FOR NESTED STRUCTURE) ---
     // --- AUTO-FILL PREMIUMS FROM LIVE DATA ---
     const updateAllPremiums = useCallback((currentForm, currentStrategy, currentSymbolData) => {
-        // 1. Safety Checks
         if (!currentSymbolData || !currentSymbolData.options) return currentForm;
         
         const newForm = { ...currentForm };
         
-        // 2. Helper to find price in the Chain
         const findPrice = (strike, type) => {
             if (!strike) return '';
-            // Match strike (Handle string/number mismatch)
             const opt = currentSymbolData.options.find(o => o.strike === Number(strike));
-            
-            if (!opt) return ''; // Strike not found in chain
-            
-            // Return LTP from the nested object
+            if (!opt) return '';
             if (type === 'CE') return opt.CE?.ltp || 0;
             if (type === 'PE') return opt.PE?.ltp || 0;
             return 0;
         };
 
-        // 3. Auto-fill Underlying Price for Stock strategies
         if (currentStrategy.includes('protective') && currentSymbolData.spot) {
             newForm.stockPrice = currentSymbolData.spot;
         }
 
-        // 4. Map Fields based on Strategy
         switch (currentStrategy) {
             // Single Leg
-            case 'long-call': case 'short-call':
-                newForm.premium = findPrice(newForm.strike, 'CE'); break;
-            case 'long-put': case 'short-put':
-                newForm.premium = findPrice(newForm.strike, 'PE'); break;
+            case 'long-call': case 'short-call': newForm.premium = findPrice(newForm.strike, 'CE'); break;
+            case 'long-put': case 'short-put': newForm.premium = findPrice(newForm.strike, 'PE'); break;
             
-            // Protective / Stock
-            case 'protective-put': 
-                newForm.premium = findPrice(newForm.strike, 'PE'); break;
-            case 'protective-call': 
-                newForm.premium = findPrice(newForm.strike, 'CE'); break;
+            // Stock
+            case 'protective-put': newForm.premium = findPrice(newForm.strike, 'PE'); break;
+            case 'protective-call': newForm.premium = findPrice(newForm.strike, 'CE'); break;
 
-            // Spreads
+            // Call Spreads / Ratios
             case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
                 newForm.premium1 = findPrice(newForm.strike1, 'CE'); 
-                newForm.premium2 = findPrice(newForm.strike2, 'CE'); 
-                break;
+                newForm.premium2 = findPrice(newForm.strike2, 'CE'); break;
+            
+            // Put Spreads
             case 'bull-put-spread': case 'bear-put-spread':
                 newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
-                newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
-                break;
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); break;
 
-            // Neutral (Mixed CE/PE)
-            case 'short-straddle': case 'long-straddle': case 'synthetic-long-stock': case 'synthetic-short-stock':
-                newForm.premium1 = findPrice(newForm.strike, 'CE'); 
-                newForm.premium2 = findPrice(newForm.strike, 'PE'); 
-                // For synthetics, usually premium is Call, premium2 is Put
-                if(currentStrategy === 'synthetic-long-stock') { 
+            // Straddles / Synthetics (Mixed)
+            case 'short-straddle': case 'long-straddle': 
+            case 'synthetic-long-stock': case 'synthetic-short-stock':
+                newForm.premium1 = findPrice(newForm.strike, 'CE'); // Usually CE
+                newForm.premium2 = findPrice(newForm.strike, 'PE'); // Usually PE
+                // Handle legacy single-field mapping if needed:
+                if (currentStrategy.includes('synthetic')) {
                     newForm.premium = findPrice(newForm.strike, 'CE'); 
                     newForm.premium2 = findPrice(newForm.strike, 'PE'); 
                 }
                 break;
 
+            // Strangles
             case 'short-strangle': case 'long-strangle':
-                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Lower Strike Put
-                newForm.premium2 = findPrice(newForm.strike2, 'CE'); // Higher Strike Call
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
+                newForm.premium2 = findPrice(newForm.strike2, 'CE'); break;
+
+            // 3-Leg Strategies
+            case 'call-butterfly':
+                newForm.premium1 = findPrice(newForm.strike1, 'CE');
+                newForm.premium2 = findPrice(newForm.strike2, 'CE');
+                newForm.premium3 = findPrice(newForm.strike3, 'CE'); break;
+            case 'jade-lizard':
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Sell Put
+                newForm.premium2 = findPrice(newForm.strike2, 'CE'); // Sell Call
+                newForm.premium3 = findPrice(newForm.strike3, 'CE'); // Buy Call
                 break;
 
+            // 4-Leg Strategies
             case 'iron-condor':
-                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Buy Put
-                newForm.premium2 = findPrice(newForm.strike2, 'PE'); // Sell Put
-                newForm.premium3 = findPrice(newForm.strike3, 'CE'); // Sell Call
-                newForm.premium4 = findPrice(newForm.strike4, 'CE'); // Buy Call
-                break;
-            
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
+                newForm.premium3 = findPrice(newForm.strike3, 'CE'); 
+                newForm.premium4 = findPrice(newForm.strike4, 'CE'); break;
             case 'iron-butterfly':
-                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Buy Put
-                newForm.premium2 = findPrice(newForm.strike2, 'PE'); // Sell Put (ATM)
-                newForm.premium3 = findPrice(newForm.strike2, 'CE'); // Sell Call (ATM)
-                newForm.premium4 = findPrice(newForm.strike3, 'CE'); // Buy Call
-                break;
+                newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
+                newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
+                newForm.premium3 = findPrice(newForm.strike2, 'CE'); 
+                newForm.premium4 = findPrice(newForm.strike3, 'CE'); break;
 
             default: break;
         }

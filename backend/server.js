@@ -278,41 +278,63 @@ function chooseClosest(chain, target) {
     return best;
 }
 
-// --- STRATEGY CONSTRUCTORS ---
+// ==================================================================
+// 🏗️ STRATEGY CONSTRUCTORS (The Complete Sensibull Suite)
+// ==================================================================
 
-// 1. Bull Call Spread Helper
+// --- 1. BASIC SINGLE LEGS ---
+function longCall(buyCall) {
+    return { name: "Long Call", legs: [{ action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }] };
+}
+function shortCall(sellCall) {
+    return { name: "Short Call", legs: [{ action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }] };
+}
+function longPut(buyPut) {
+    return { name: "Long Put", legs: [{ action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE }] };
+}
+function shortPut(sellPut) {
+    return { name: "Short Put", legs: [{ action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }] };
+}
+
+// --- 2. VERTICAL SPREADS (Directional) ---
 function bullCallSpread(buyCall, sellCall) {
     return {
         name: "Bull Call Spread",
         legs: [
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE },
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }, // ITM/ATM
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE } // OTM
         ]
     };
 }
-
-// 2. Bear Put Spread Helper
-function bearPutSpread(buyPut, sellPut) {
+function bullPutSpread(sellPut, buyPut) {
     return {
-        name: "Bear Put Spread",
+        name: "Bull Put Spread",
         legs: [
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }, // Sell High (Credit)
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE }    // Buy Low (Hedge)
         ]
     };
 }
-
-// 3. Bear Call Spread Helper (Often missing!)
 function bearCallSpread(sellCall, buyCall) {
     return {
         name: "Bear Call Spread",
         legs: [
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }, // Sell Low (Credit)
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }    // Buy High (Hedge)
+        ]
+    };
+}
+function bearPutSpread(buyPut, sellPut) {
+    return {
+        name: "Bear Put Spread",
+        legs: [
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },  // ITM/ATM
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE } // OTM
         ]
     };
 }
 
+// --- 3. NEUTRAL & VOLATILITY ---
 function shortStraddle(chain, atm) {
     return {
         name: "Short Straddle",
@@ -322,7 +344,15 @@ function shortStraddle(chain, atm) {
         ]
     };
 }
-
+function longStraddle(chain, atm) {
+    return {
+        name: "Long Straddle",
+        legs: [
+            { action: "BUY", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
+            { action: "BUY", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+        ]
+    };
+}
 function shortStrangle(sellPut, sellCall) {
     return {
         name: "Short Strangle",
@@ -332,55 +362,109 @@ function shortStrangle(sellPut, sellCall) {
         ]
     };
 }
-
+function longStrangle(buyPut, buyCall) {
+    return {
+        name: "Long Strangle",
+        legs: [
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+        ]
+    };
+}
 function ironCondor(sellPut, buyPut, sellCall, buyCall) {
     return {
         name: "Iron Condor",
         legs: [
             { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
-            { action: "BUY",  type: "PE", strike: buyPut.strike,  price: buyPut.PE.ltp,  greeks: buyPut.PE },
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
             { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
-            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp,  greeks: buyCall.CE }
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
         ]
     };
 }
-
-function ironButterfly(chain, atmIndex) {
+function ironButterfly(chain, atmIndex, buyPut, buyCall) {
     const atm = chain[atmIndex];
-    const lower = chain[atmIndex - 1] || chain[atmIndex]; 
-    const upper = chain[atmIndex + 1] || chain[atmIndex]; 
     return {
         name: "Iron Butterfly",
         legs: [
-            { action: "BUY",  type: "PE", strike: lower.strike, price: lower.PE.ltp, greeks: lower.PE },
-            { action: "SELL", type: "PE", strike: atm.strike,   price: atm.PE.ltp,   greeks: atm.PE },
-            { action: "SELL", type: "CE", strike: atm.strike,   price: atm.CE.ltp,   greeks: atm.CE },
-            { action: "BUY",  type: "CE", strike: upper.strike, price: upper.CE.ltp, greeks: upper.CE }
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
+            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE },
+            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+        ]
+    };
+}
+function callButterfly(chain, atmIndex) {
+    // Standard Butterfly: Buy 1 ITM Call, Sell 2 ATM Calls, Buy 1 OTM Call
+    const atm = chain[atmIndex];
+    const lower = chain[Math.max(0, atmIndex - 2)]; // 2 strikes down
+    const upper = chain[Math.min(chain.length - 1, atmIndex + 2)]; // 2 strikes up
+    return {
+        name: "Call Butterfly",
+        legs: [
+            { action: "BUY", type: "CE", strike: lower.strike, price: lower.CE.ltp, greeks: lower.CE, qty: 1 },
+            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE, qty: 2 },
+            { action: "BUY", type: "CE", strike: upper.strike, price: upper.CE.ltp, greeks: upper.CE, qty: 1 }
         ]
     };
 }
 
+// --- 4. STOCK + OPTION (HEDGING) ---
+function protectivePut(spot, chain, atmIndex) {
+    // Buy Stock + Buy ATM/OTM Put
+    const put = chain[atmIndex]; 
+    return {
+        name: "Protective Put",
+        legs: [
+            { action: "BUY", type: "STOCK", price: spot, qty: 1 }, // Virtual Stock Leg
+            { action: "BUY", type: "PE", strike: put.strike, price: put.PE.ltp, greeks: put.PE }
+        ]
+    };
+}
+function protectiveCall(spot, chain, atmIndex) { // Covered Call
+    const call = chain[Math.min(chain.length - 1, atmIndex + 2)]; // Sell OTM Call
+    return {
+        name: "Covered Call", // (Protective Call)
+        legs: [
+            { action: "BUY", type: "STOCK", price: spot, qty: 1 },
+            { action: "SELL", type: "CE", strike: call.strike, price: call.CE.ltp, greeks: call.CE }
+        ]
+    };
+}
+
+// --- 5. SYNTHETICS ---
+function syntheticLongStock(chain, atmIndex) {
+    // Buy Call + Sell Put (Same Strike)
+    const atm = chain[atmIndex];
+    return {
+        name: "Synthetic Long",
+        legs: [
+            { action: "BUY", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
+            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+        ]
+    };
+}
+function syntheticShortStock(chain, atmIndex) {
+    // Sell Call + Buy Put (Same Strike)
+    const atm = chain[atmIndex];
+    return {
+        name: "Synthetic Short",
+        legs: [
+            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
+            { action: "BUY", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+        ]
+    };
+}
 function jadeLizard(sellPut, sellCall, buyCall) {
     return {
         name: "Jade Lizard",
         legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
+            { action: "SELL", type: "PE", strike: sellPut.strike,  price: sellPut.PE.ltp, greeks: sellPut.PE },
             { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
-            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp,  greeks: buyCall.CE }
+            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp, greeks: buyCall.CE }
         ]
     };
 }
-
-function putCreditSpread(sellPut, buyPut) {
-    return {
-        name: "Put Credit Spread",
-        legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
-            { action: "BUY",  type: "PE", strike: buyPut.strike,  price: buyPut.PE.ltp,  greeks: buyPut.PE }
-        ]
-    };
-}
-
 // ==================================================================
 // 🧠 TEAM LEAD'S ROBUST STRIKE SELECTION ENGINE (CLEAN VERSION)
 // ==================================================================
@@ -514,41 +598,83 @@ function improvedStrikeSelection(chain, spot, dte) {
 
 // 6. MAIN SELECTOR WRAPPER
 function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
+    // 1. Basic Validation
     if (!spot || chain.length < 5) return { error: "Insufficient data for strategy." };
 
+    // ⚙️ SETTINGS: How many days counts as "Near Expiry"?
+    // Set to 3 to include Today + Next 3 Days
+    const NEAR_EXPIRY_DAYS = 3; 
+
+    // 2. Run Team Lead's Robust Strike Selector
     const picks = improvedStrikeSelection(chain, spot, dte);
     const { atmNode, atmIndex, sellPut, buyPut, sellCall, buyCall, expectedMove } = picks;
 
-    const strategies = [];
-
-    // Neutral
-    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall));
-    strategies.push(shortStraddle(chain, atmNode));
-    strategies.push(shortStrangle(sellPut, sellCall));
-    
-    // Iron Butterfly Wings logic
+    // Define Specific Wings
     const ibBuyPut = chain[Math.max(0, atmIndex - 3)] || buyPut;
     const ibBuyCall = chain[Math.min(chain.length - 1, atmIndex + 3)] || buyCall;
+    const strangleBuyPut = chain[Math.max(0, atmIndex - 5)] || buyPut;
+    const strangleBuyCall = chain[Math.min(chain.length - 1, atmIndex + 5)] || buyCall;
+
+    // 3. Build the COMPLETE Strategy List
+    const strategies = [];
+
+    // --- A. NEUTRAL / VOLATILITY ---
+    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall));
     strategies.push(ironButterfly(chain, atmIndex, ibBuyPut, ibBuyCall));
+    strategies.push(shortStraddle(chain, atmNode));
+    strategies.push(shortStrangle(sellPut, sellCall));
+    strategies.push(longStraddle(chain, atmNode));
+    strategies.push(longStrangle(strangleBuyPut, strangleBuyCall));
+    strategies.push(callButterfly(chain, atmIndex)); 
 
-    // Bullish
-    strategies.push(putCreditSpread(sellPut, buyPut));
-    strategies.push(bullCallSpread(atmNode, sellCall));
+    // --- B. BULLISH ---
+    strategies.push(bullPutSpread(sellPut, buyPut));    // Credit
+    strategies.push(bullCallSpread(atmNode, sellCall)); // Debit
     strategies.push(jadeLizard(sellPut, sellCall, buyCall));
+    strategies.push(longCall(atmNode));
+    strategies.push(syntheticLongStock(chain, atmIndex)); 
+    strategies.push(protectiveCall(spot, chain, atmIndex)); 
 
-    // Bearish
-    strategies.push(bearCallSpread(sellCall, buyCall));
-    strategies.push(bearPutSpread(atmNode, sellPut));
+    // --- C. BEARISH ---
+    strategies.push(bearCallSpread(sellCall, buyCall)); // Credit
+    strategies.push(bearPutSpread(atmNode, sellPut));   // Debit
+    strategies.push(longPut(atmNode));
+    strategies.push(syntheticShortStock(chain, atmIndex)); 
+    strategies.push(protectivePut(spot, chain, atmIndex)); 
 
+    // 4. INTELLIGENT SELECTION
     let chosenStrategy;
+    
+    // Check if we are in the "Theta Zone"
+    const isNearExpiry = dte <= NEAR_EXPIRY_DAYS;
+
+    console.log(`🧠 AI Decision -> Signal: ${signal} | DTE: ${dte} | Near Expiry Mode: ${isNearExpiry}`);
+
     if (signal === "BULL") {
-        chosenStrategy = strategies.find(s => s.name === "Put Credit Spread"); 
-    } else if (signal === "BEAR") {
-        chosenStrategy = strategies.find(s => s.name === "Bear Call Spread");
-    } else {
-        if (dte <= 1) {
-            chosenStrategy = strategies.find(s => s.name === "Iron Butterfly") || strategies[0];
+        if (isNearExpiry) {
+            // NEAR (0-3 Days): Sell Premium (Credit Spread)
+            chosenStrategy = strategies.find(s => s.name === "Bull Put Spread");
         } else {
+            // FAR (>3 Days): Buy Premium (Debit Spread)
+            chosenStrategy = strategies.find(s => s.name === "Bull Call Spread");
+        }
+    } 
+    else if (signal === "BEAR") {
+        if (isNearExpiry) {
+            // NEAR: Sell Premium (Credit Spread)
+            chosenStrategy = strategies.find(s => s.name === "Bear Call Spread");
+        } else {
+            // FAR: Buy Premium (Debit Spread)
+            chosenStrategy = strategies.find(s => s.name === "Bear Put Spread");
+        }
+    } 
+    else {
+        // NEUTRAL
+        if (isNearExpiry) {
+            // NEAR: Iron Butterfly (Aggressive Theta Collection)
+            chosenStrategy = strategies.find(s => s.name === "Iron Butterfly");
+        } else {
+            // FAR: Iron Condor (Wider Safety Range)
             chosenStrategy = strategies.find(s => s.name === "Iron Condor");
         }
     }
@@ -723,7 +849,7 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     return await fyers.place_order(payload);
 }
 // ==================================================================
-// 🌍 UNIVERSAL MARKET DATA FETCHER (WITH DEBUG & FALLBACK)
+// 4. FETCH OPTION CHAIN & CALCULATE GREEKS (COMPLETE & FIXED)
 // ==================================================================
 async function fetchMarketDataWithGreeks(symbol) {
     let inputSymbol = symbol.toUpperCase();
@@ -758,17 +884,25 @@ async function fetchMarketDataWithGreeks(symbol) {
     let lotSize = getLotSizeForSymbol(userFriendlyKey || underlyingSymbolFyers);
 
     // 3. Fetch Spot Price & VIX
-    const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
-        params: { symbols: `${underlyingSymbolFyers},NSE:INDIAVIX-INDEX` }, 
-        headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
-    });
-    
-    const spotNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === underlyingSymbolFyers) : null;
-    const vixNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX') : null;
+    let spotPrice = 0;
+    let effectiveVix = 14.5;
 
-    let spotPrice = spotNode?.v?.lp || 0;
-    let effectiveVix = vixNode?.v?.lp || 14.5;
-    if (['ADANIENT', 'ADANIGREEN'].includes(userFriendlyKey)) effectiveVix = 25.0;
+    try {
+        const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
+            params: { symbols: `${underlyingSymbolFyers},NSE:INDIAVIX-INDEX` }, 
+            headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
+        });
+        
+        const spotNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === underlyingSymbolFyers) : null;
+        const vixNode = quotesRes.data.d ? quotesRes.data.d.find(q => q.n === 'NSE:INDIAVIX-INDEX') : null;
+
+        spotPrice = spotNode?.v?.lp || 0;
+        effectiveVix = vixNode?.v?.lp || 14.5;
+        // Adani Volatility adjustment
+        if (['ADANIENT', 'ADANIGREEN'].includes(userFriendlyKey)) effectiveVix = 25.0;
+    } catch (e) { 
+        console.log(`⚠️ Quote fetch failed, using defaults or chain estimation.`);
+    }
 
     // 4. PREPARE OPTION CHAIN FETCH
     const fyers = new fyersModel();
@@ -777,29 +911,37 @@ async function fetchMarketDataWithGreeks(symbol) {
 
     let chainRes;
     let daysToExpiry = 0;
+    let nearestExpiry = null; // ✅ Define outside try block to return it later
     let optionsList = [];
 
     try {
         // ------------------------------------------------------
-        // 🚀 DEBUG EXPIRE LOGIC
+        // 🚀 EXPIRY LOGIC (FIXED)
         // ------------------------------------------------------
         const metaRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 1, timestamp: "" });
         
-        // LOG: See exactly what Fyers sent back
-        // console.log(`🔍 [${userFriendlyKey}] Raw Dates:`, JSON.stringify(metaRes.data?.expiryData));
-
         if (metaRes.data && metaRes.data.expiryData) {
-            const now = new Date().getTime();
+            const now = new Date();
+            const todayTs = Math.floor(now.getTime() / 1000);
             
-            // Filter for FUTURE dates
-            const validExpiries = metaRes.data.expiryData.filter(e => new Date(e.date * 1000).getTime() > now);
+            // ✅ FIX: Relaxed Filter. Allows dates from the last 24 hours to handle same-day expiry/timezone issues.
+            const validExpiries = metaRes.data.expiryData.filter(e => {
+                return e.date >= (todayTs - 86400); 
+            });
             
             // Sort to find the NEAREST one
-            const nearestExpiry = validExpiries.sort((a,b) => a.date - b.date)[0];
+            validExpiries.sort((a,b) => a.date - b.date);
+
+            // Select the best expiry
+            if (validExpiries.length > 0) {
+                nearestExpiry = validExpiries[0];
+            }
 
             if (nearestExpiry) {
                 const expiryTimestamp = nearestExpiry.date;
-                const diffTime = (new Date(expiryTimestamp * 1000).getTime()) - now;
+                const diffTime = (new Date(expiryTimestamp * 1000).getTime()) - now.getTime();
+                
+                // ✅ FIX: Accurate DTE calculation
                 daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                 if (daysToExpiry < 0) daysToExpiry = 0;
 
@@ -812,19 +954,24 @@ async function fetchMarketDataWithGreeks(symbol) {
                     timestamp: expiryTimestamp 
                 });
             } else {
-                // 🚨 FALLBACK: If no future date found (e.g. system time issue), FETCH BLINDLY
+                // 🚨 FALLBACK: If relaxed filter still fails, try raw first date
                 console.warn(`⚠️ Filter removed all dates for ${userFriendlyKey}. Fetching default chain...`);
                 chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 100, timestamp: "" });
+                
+                // Rescue expiry info if possible
+                if (metaRes.data.expiryData.length > 0) {
+                    nearestExpiry = metaRes.data.expiryData[0];
+                }
             }
         }
     } catch (error) {
         console.error(`❌ Chain Fetch Error (${userFriendlyKey}):`, error.message);
     }
 
-    // 5. Process Options
+    // 5. PROCESS OPTIONS
     const strikeMap = new Map();
     if (chainRes?.data?.optionsChain) {
-        // Fallback Spot
+        // Fallback Spot if Quotes API failed
         if (!spotPrice || spotPrice === 0) {
             const mid = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length/2)];
             spotPrice = mid.strike_price;
@@ -836,6 +983,8 @@ async function fetchMarketDataWithGreeks(symbol) {
                 strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE: {}, PE: {} });
             }
             const item = strikeMap.get(opt.strike_price);
+            
+            // Calculate Greeks
             const greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, opt.option_type, effectiveVix);
             
             if (opt.option_type === 'CE') item.CE = { ltp: opt.ltp, symbol: opt.symbol, ...greeks };
@@ -851,6 +1000,10 @@ async function fetchMarketDataWithGreeks(symbol) {
         spot: spotPrice,
         vix: effectiveVix,
         daysToExpiry: daysToExpiry,
+        
+        // ✅ NEW: Return the Expiry Date String for the Frontend
+        expiryDate: (nearestExpiry) ? nearestExpiry.date_string : "N/A",
+        
         options: optionsList,
         lotSize: lotSize,
     };
