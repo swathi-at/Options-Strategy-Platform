@@ -849,7 +849,7 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     return await fyers.place_order(payload);
 }
 // ==================================================================
-// 4. FETCH OPTION CHAIN & CALCULATE GREEKS (COMPLETE & FIXED)
+// 4. FETCH OPTION CHAIN (DEEP SCAN & DIAGNOSTICS)
 // ==================================================================
 async function fetchMarketDataWithGreeks(symbol) {
     let inputSymbol = symbol.toUpperCase();
@@ -875,18 +875,15 @@ async function fetchMarketDataWithGreeks(symbol) {
         userFriendlyKey = inputSymbol.split(':')[1].replace(/-EQ|-INDEX/g, '');
     } 
     else {
-        // Assume Stock -> Default to NSE Equity
         underlyingSymbolFyers = `NSE:${inputSymbol}-EQ`;
         userFriendlyKey = inputSymbol;
     }
 
-    // 2. Get Lot Size
     let lotSize = getLotSizeForSymbol(userFriendlyKey || underlyingSymbolFyers);
-
-    // 3. Fetch Spot Price & VIX
     let spotPrice = 0;
     let effectiveVix = 14.5;
 
+    // 2. FETCH QUOTES
     try {
         const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
             params: { symbols: `${underlyingSymbolFyers},NSE:INDIAVIX-INDEX` }, 
@@ -898,99 +895,97 @@ async function fetchMarketDataWithGreeks(symbol) {
 
         spotPrice = spotNode?.v?.lp || 0;
         effectiveVix = vixNode?.v?.lp || 14.5;
-        // Adani Volatility adjustment
         if (['ADANIENT', 'ADANIGREEN'].includes(userFriendlyKey)) effectiveVix = 25.0;
-    } catch (e) { 
-        console.log(`⚠️ Quote fetch failed, using defaults or chain estimation.`);
-    }
+    } catch (e) { console.log(`⚠️ Quote fetch failed, using defaults.`); }
 
-    // 4. PREPARE OPTION CHAIN FETCH
+    // 3. ROBUST EXPIRY FETCHING
     const fyers = new fyersModel();
     fyers.setAppId(fyersAppId);
     fyers.setAccessToken(fyersAccessToken);
 
     let chainRes;
     let daysToExpiry = 0;
-    let nearestExpiry = null; // ✅ Define outside try block to return it later
+    let nearestExpiry = null; 
     let optionsList = [];
 
     try {
-        // ------------------------------------------------------
-        // 🚀 EXPIRY LOGIC (FIXED)
-        // ------------------------------------------------------
-        const metaRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 1, timestamp: "" });
-        
-        if (metaRes.data && metaRes.data.expiryData) {
-            const now = new Date();
-            const todayTs = Math.floor(now.getTime() / 1000);
-            
-            // ✅ FIX: Relaxed Filter. Allows dates from the last 24 hours to handle same-day expiry/timezone issues.
-            const validExpiries = metaRes.data.expiryData.filter(e => {
-                return e.date >= (todayTs - 86400); 
-            });
-            
-            // Sort to find the NEAREST one
-            validExpiries.sort((a,b) => a.date - b.date);
+        // [FIX 1] Increase strikecount to 20 to find "hidden" weeklies
+        const metaRes = await fyers.getOptionChain({ 
+            symbol: underlyingSymbolFyers, 
+            strikecount: 20, 
+            timestamp: "" 
+        });
 
-            // Select the best expiry
+        if (metaRes.data && metaRes.data.expiryData) {
+            const rawExpiries = metaRes.data.expiryData;
+
+            // Permissive Filter (Includes Yesterday)
+            const cutoffTime = new Date();
+            cutoffTime.setHours(0, 0, 0, 0);
+            cutoffTime.setDate(cutoffTime.getDate() - 1); 
+
+            const validExpiries = rawExpiries.filter(e => {
+                const unixTime = Number(e.expiry); 
+                if (isNaN(unixTime)) return false; 
+                const expiryDate = new Date(unixTime * 1000);
+                return expiryDate.getTime() >= cutoffTime.getTime();
+            });
+
+            validExpiries.sort((a, b) => Number(a.expiry) - Number(b.expiry));
+
             if (validExpiries.length > 0) {
                 nearestExpiry = validExpiries[0];
+                console.log(`✅ [${userFriendlyKey}] Selected Expiry: ${nearestExpiry.date} (Ts: ${nearestExpiry.expiry})`);
+                
+                // [FIX 2] DIAGNOSTIC CHECK
+                const isIndex = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'].includes(userFriendlyKey);
+                const tempDte = (new Date(Number(nearestExpiry.expiry)*1000) - new Date()) / (1000*3600*24);
+                
+                if (isIndex && tempDte > 7) {
+                    console.warn(`⚠️ [${userFriendlyKey}] Warning: Weekly missing? Closest found is ${tempDte.toFixed(1)} days away.`);
+                    
+                    // 🔍 PRINT WHAT THE API ACTUALLY SENT
+                    console.log(`🔍 RAW API RESPONSE for ${userFriendlyKey}:`);
+                    rawExpiries.slice(0, 5).forEach(e => {
+                         const d = new Date(Number(e.expiry)*1000);
+                         console.log(`   - Date: ${e.date} | TS: ${e.expiry} | Valid? ${d.getTime() >= cutoffTime.getTime()}`);
+                    });
+                }
+            } else {
+                console.warn(`⚠️ [${userFriendlyKey}] Filter removed all dates. Fallback to raw[0].`);
+                nearestExpiry = rawExpiries[0];
             }
 
-            if (nearestExpiry) {
-                const expiryTimestamp = nearestExpiry.date;
-                const diffTime = (new Date(expiryTimestamp * 1000).getTime()) - now.getTime();
-                
-                // ✅ FIX: Accurate DTE calculation
-                daysToExpiry = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                if (daysToExpiry < 0) daysToExpiry = 0;
+            if (nearestExpiry && nearestExpiry.expiry) {
+                const unixTime = Number(nearestExpiry.expiry);
+                if (!isNaN(unixTime)) {
+                    const expiryDateObj = new Date(unixTime * 1000);
+                    const now = new Date();
+                    const diffTime = expiryDateObj.getTime() - now.getTime();
+                    daysToExpiry = Math.max(0, diffTime / (1000 * 60 * 60 * 24));
+                    console.log(`📅 DTE: ${daysToExpiry.toFixed(4)} days`);
 
-                console.log(`📅 [${userFriendlyKey}] Nearest Expiry: ${nearestExpiry.date_string} (DTE: ${daysToExpiry})`);
-
-                // FETCH FULL CHAIN (Specific Date)
-                chainRes = await fyers.getOptionChain({ 
-                    symbol: underlyingSymbolFyers, 
-                    strikecount: 100, 
-                    timestamp: expiryTimestamp 
-                });
-            } else {
-                // 🚨 FALLBACK: If relaxed filter still fails, try raw first date
-                console.warn(`⚠️ Filter removed all dates for ${userFriendlyKey}. Fetching default chain...`);
-                chainRes = await fyers.getOptionChain({ symbol: underlyingSymbolFyers, strikecount: 100, timestamp: "" });
-                
-                // Rescue expiry info if possible
-                if (metaRes.data.expiryData.length > 0) {
-                    nearestExpiry = metaRes.data.expiryData[0];
+                    chainRes = await fyers.getOptionChain({ 
+                        symbol: underlyingSymbolFyers, 
+                        strikecount: 100, 
+                        timestamp: unixTime 
+                    });
                 }
             }
         }
-    } catch (error) {
-        console.error(`❌ Chain Fetch Error (${userFriendlyKey}):`, error.message);
-    }
+    } catch (error) { console.error(`❌ Chain Fetch Error (${userFriendlyKey}):`, error.message); }
 
-    // 5. PROCESS OPTIONS
+    // 4. PROCESS CHAIN (Standard)
     const strikeMap = new Map();
     if (chainRes?.data?.optionsChain) {
-        // Fallback Spot if Quotes API failed
-        if (!spotPrice || spotPrice === 0) {
-            const mid = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length/2)];
-            spotPrice = mid.strike_price;
-            console.log(`⚠️ Spot estimated from Chain: ${spotPrice}`);
-        }
-
+        if (!spotPrice) spotPrice = chainRes.data.optionsChain[Math.floor(chainRes.data.optionsChain.length/2)].strike_price;
         chainRes.data.optionsChain.forEach(opt => {
-            if (!strikeMap.has(opt.strike_price)) {
-                strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE: {}, PE: {} });
-            }
+            if (!strikeMap.has(opt.strike_price)) strikeMap.set(opt.strike_price, { strike: opt.strike_price, CE: {}, PE: {} });
             const item = strikeMap.get(opt.strike_price);
-            
-            // Calculate Greeks
             const greeks = estimateGreeks(spotPrice, opt.strike_price, daysToExpiry, opt.ltp, opt.option_type, effectiveVix);
-            
-            if (opt.option_type === 'CE') item.CE = { ltp: opt.ltp, symbol: opt.symbol, ...greeks };
-            else item.PE = { ltp: opt.ltp, symbol: opt.symbol, ...greeks };
+            if (opt.option_type === 'CE') item.CE = { ltp: opt.ltp, symbol: opt.symbol, oi: opt.oi, ...greeks };
+            else item.PE = { ltp: opt.ltp, symbol: opt.symbol, oi: opt.oi, ...greeks };
         });
-        
         optionsList = Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike);
     }
 
@@ -999,11 +994,8 @@ async function fetchMarketDataWithGreeks(symbol) {
         fyersSymbol: underlyingSymbolFyers,
         spot: spotPrice,
         vix: effectiveVix,
-        daysToExpiry: daysToExpiry,
-        
-        // ✅ NEW: Return the Expiry Date String for the Frontend
-        expiryDate: (nearestExpiry) ? nearestExpiry.date_string : "N/A",
-        
+        daysToExpiry: daysToExpiry, 
+        expiryDate: (nearestExpiry) ? nearestExpiry.date : "N/A", 
         options: optionsList,
         lotSize: lotSize,
     };
@@ -1256,16 +1248,41 @@ app.post('/calculate', async (req, res) => {
 const paperTrades = [];
 function findCurrentPrice(symbol, strike, optionType) {
     try {
-        let key = symbol.toUpperCase().includes(':') ? symbol.split(':')[1].replace('-INDEX', '') : symbol.toUpperCase();
-        if (key === 'NIFTY 50') key = 'NIFTY';
-        const cached = liveDataCache[key];
-        if (!cached || !cached.data) return null;
-        const opt = cached.data.options.find(o => o.strike === Number(strike));
-        // MODIFIED FOR NEW NESTED STRUCTURE
-        return opt ? (optionType === 'CE' ? opt.CE.ltp : opt.PE.ltp) : null;
-    } catch (err) { return null; }
-}
+        // 1. Normalize the incoming symbol to match your Cache Keys
+        let key = symbol.toUpperCase();
+        
+        // Remove "NSE:", "-INDEX", etc. to match how you store it in 'liveDataCache'
+        if (key.includes('NSE:')) key = key.replace('NSE:', '');
+        if (key.includes('-INDEX')) key = key.replace('-INDEX', '');
+        if (key.includes('NIFTY 50')) key = 'NIFTY'; // <--- FIX FOR YOUR DROPDOWN
 
+        // 🔍 DEBUG LOG: See what we are looking for
+        // console.log(`🔍 LOOKUP: Key [${key}] | Strike [${strike}] | Type [${optionType}]`);
+
+        const cached = liveDataCache[key];
+        
+        if (!cached || !cached.data) {
+            console.log(`❌ CACHE MISS for [${key}]. Available Keys:`, Object.keys(liveDataCache));
+            return 0.05; // Default error value
+        }
+
+        // 2. Find the Option
+        const opt = cached.data.options.find(o => o.strike === Number(strike));
+        
+        if (!opt) {
+            console.log(`❌ STRIKE MISS: [${strike}] not found in [${key}] chain.`);
+            return 0.05;
+        }
+
+        // 3. Return Price
+        const price = (optionType === 'CE') ? opt.CE.ltp : opt.PE.ltp;
+        return price || 0.05;
+
+    } catch (err) { 
+        console.error("Lookup Error:", err.message);
+        return 0.05; 
+    }
+}
 app.post('/api/paper-trade', (req, res) => {
     try {
         const { symbol, strategyType, legs } = req.body;
