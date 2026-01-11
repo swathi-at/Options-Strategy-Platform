@@ -263,7 +263,7 @@ function getSensibullConfig(symbol) {
     // 🔴 MIDCAP NIFTY
     else if (s.includes('MIDCP') || s.includes('MIDCAP') || s.includes('MID CP')) {
         // Midcap Select strikes are 25 points apart
-        return { width: 75, interval: 25 };
+        return { width: 100, interval: 25 };
     } 
     // 🔴 SENSEX
     else if (s.includes('SENSEX')) {
