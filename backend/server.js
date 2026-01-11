@@ -244,224 +244,320 @@ function estimateGreeks(spot, strike, daysToExpiry, premium, type, vix) {
 }
 
 // ==================================================================
-// 6. LOGIC: STRATEGY ENGINE
+// 6. LOGIC: STRATEGY ENGINE (STRICT SENSIBULL MATCHING)
 // ==================================================================
 
-// --- HELPERS ---
-function detectATM(chain, spot) {
+// --- 1. CONFIGURATION: SENSIBULL DEFAULTS ---
+function getSensibullConfig(symbol) {
+    const s = symbol.toUpperCase();
+
+    // 🔴 BANKNIFTY / NIFTY BANK
+    if (s.includes('BANKNIFTY') || s.includes('NIFTYBANK') || s.includes('NIFTY BANK')) {
+        return { width: 500, interval: 100 }; 
+    } 
+    // 🔴 FINNIFTY / NIFTY FINANCIAL
+    else if (s.includes('FINNIFTY') || s.includes('FINANCIAL') || s.includes('FIN SERVICE')) {
+        // Finnifty strikes are 50 points apart
+        return { width: 200, interval: 50 };
+    } 
+    // 🔴 MIDCAP NIFTY
+    else if (s.includes('MIDCP') || s.includes('MIDCAP') || s.includes('MID CP')) {
+        // Midcap Select strikes are 25 points apart
+        return { width: 75, interval: 25 };
+    } 
+    // 🔴 SENSEX
+    else if (s.includes('SENSEX')) {
+        return { width: 400, interval: 100 };
+    }
+    
+    // DEFAULT (NIFTY 50 & OTHERS)
+    return { width: 200, interval: 50 };
+}
+
+// --- 2. HELPERS ---
+function getStrikeByPrice(chain, priceTarget, type) {
     let best = chain[0];
-    let diff = Infinity;
+    let minDiff = Infinity;
     for (const node of chain) {
-        if(node && node.strike) {
-            const d = Math.abs(node.strike - spot);
-            if (d < diff) { diff = d; best = node; }
+        const item = type === 'CE' ? node.CE : node.PE;
+        if (item && item.ltp) {
+            const d = Math.abs(item.ltp - priceTarget);
+            if (d < minDiff) { minDiff = d; best = node; }
         }
     }
     return best;
 }
 
-function expectedMove(spot, iv, dte) {
-    const volatility = iv / 100;
-    const t = dte / 365;
-    return spot * volatility * Math.sqrt(t);
-}
+function getStrikeByExactStrike(chain, targetStrike) {
+    // 🎯 Finds the exact strike (e.g., 25650). 
+    // If not found, finds the closest one to prevent crashes.
+    const exact = chain.find(c => c.strike === targetStrike);
+    if (exact) return exact;
 
-function chooseClosest(chain, target) {
     let best = chain[0];
-    let diff = Infinity;
+    let minDiff = Infinity;
     for (const node of chain) {
-        if(node && node.strike) {
-            const d = Math.abs(node.strike - target);
-            if (d < diff) { diff = d; best = node; }
-        }
+        const d = Math.abs(node.strike - targetStrike);
+        if (d < minDiff) { minDiff = d; best = node; }
     }
     return best;
 }
 
 // ==================================================================
-// 🏗️ STRATEGY CONSTRUCTORS (The Complete Sensibull Suite)
+// 🏗️ STRATEGY BUILDERS (COMPLETE SENSIBULL SUITE)
 // ==================================================================
 
-// --- 1. BASIC SINGLE LEGS ---
-function longCall(buyCall) {
-    return { name: "Long Call", legs: [{ action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }] };
-}
-function shortCall(sellCall) {
-    return { name: "Short Call", legs: [{ action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }] };
-}
-function longPut(buyPut) {
-    return { name: "Long Put", legs: [{ action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE }] };
-}
-function shortPut(sellPut) {
-    return { name: "Short Put", legs: [{ action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }] };
+// --- 1. SINGLE LEGS ---
+
+function buildLongCall(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
+    return { name: "Long Call", legs: [{ action: "BUY", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 }] };
 }
 
-// --- 2. VERTICAL SPREADS (Directional) ---
-function bullCallSpread(buyCall, sellCall) {
+function buildShortCall(chain, atmStrike, config) {
+    // Sensibull Default: Sell OTM Call (1 Width away)
+    const node = getStrikeByExactStrike(chain, atmStrike + config.width);
+    return { name: "Short Call", legs: [{ action: "SELL", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 }] };
+}
+
+function buildLongPut(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
+    return { name: "Long Put", legs: [{ action: "BUY", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }] };
+}
+
+function buildShortPut(chain, atmStrike, config) {
+    // Sensibull Default: Sell OTM Put (1 Width away)
+    const node = getStrikeByExactStrike(chain, atmStrike - config.width);
+    return { name: "Short Put", legs: [{ action: "SELL", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }] };
+}
+
+// --- 2. VERTICAL SPREADS (DIRECTIONAL) ---
+
+function buildBullCallSpread(chain, atmStrike, config) {
+    const buyNode = getStrikeByExactStrike(chain, atmStrike);
+    const sellNode = getStrikeByExactStrike(chain, atmStrike + config.width);
     return {
         name: "Bull Call Spread",
         legs: [
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }, // ITM/ATM
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE } // OTM
+            { action: "BUY", type: "CE", strike: buyNode.strike, price: buyNode.CE.ltp, greeks: buyNode.CE, qty: 1 },
+            { action: "SELL", type: "CE", strike: sellNode.strike, price: sellNode.CE.ltp, greeks: sellNode.CE, qty: 1 }
         ]
     };
 }
-function bullPutSpread(sellPut, buyPut) {
+
+function buildBullPutSpread(chain, atmStrike, config) {
+    const sellNode = getStrikeByExactStrike(chain, atmStrike);
+    const buyNode = getStrikeByExactStrike(chain, atmStrike - config.width);
     return {
         name: "Bull Put Spread",
         legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE }, // Sell High (Credit)
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE }    // Buy Low (Hedge)
+            { action: "SELL", type: "PE", strike: sellNode.strike, price: sellNode.PE.ltp, greeks: sellNode.PE, qty: 1 },
+            { action: "BUY", type: "PE", strike: buyNode.strike, price: buyNode.PE.ltp, greeks: buyNode.PE, qty: 1 }
         ]
     };
 }
-function bearCallSpread(sellCall, buyCall) {
+
+function buildBearCallSpread(chain, atmStrike, config) {
+    const sellNode = getStrikeByExactStrike(chain, atmStrike);
+    const buyNode = getStrikeByExactStrike(chain, atmStrike + config.width);
     return {
         name: "Bear Call Spread",
         legs: [
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }, // Sell Low (Credit)
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }    // Buy High (Hedge)
+            { action: "SELL", type: "CE", strike: sellNode.strike, price: sellNode.CE.ltp, greeks: sellNode.CE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyNode.strike, price: buyNode.CE.ltp, greeks: buyNode.CE, qty: 1 }
         ]
     };
 }
-function bearPutSpread(buyPut, sellPut) {
+
+function buildBearPutSpread(chain, atmStrike, config) {
+    const buyNode = getStrikeByExactStrike(chain, atmStrike);
+    const sellNode = getStrikeByExactStrike(chain, atmStrike - config.width);
     return {
         name: "Bear Put Spread",
         legs: [
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },  // ITM/ATM
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE } // OTM
+            { action: "BUY", type: "PE", strike: buyNode.strike, price: buyNode.PE.ltp, greeks: buyNode.PE, qty: 1 },
+            { action: "SELL", type: "PE", strike: sellNode.strike, price: sellNode.PE.ltp, greeks: sellNode.PE, qty: 1 }
         ]
     };
 }
 
-// --- 3. NEUTRAL & VOLATILITY ---
-function shortStraddle(chain, atm) {
+// --- 3. RATIO SPREADS ---
+
+function buildCallRatioBackSpread(chain, atmStrike, config) {
+    const sellNode = getStrikeByExactStrike(chain, atmStrike);
+    const buyNode = getStrikeByExactStrike(chain, atmStrike + config.width);
+    return {
+        name: "Call Ratio Back Spread",
+        legs: [
+            { action: "SELL", type: "CE", strike: sellNode.strike, price: sellNode.CE.ltp, greeks: sellNode.CE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyNode.strike, price: buyNode.CE.ltp, greeks: buyNode.CE, qty: 2 }
+        ]
+    };
+}
+
+function buildPutRatioBackSpread(chain, atmStrike, config) {
+    const sellNode = getStrikeByExactStrike(chain, atmStrike);
+    const buyNode = getStrikeByExactStrike(chain, atmStrike - config.width);
+    return {
+        name: "Put Ratio Back Spread",
+        legs: [
+            { action: "SELL", type: "PE", strike: sellNode.strike, price: sellNode.PE.ltp, greeks: sellNode.PE, qty: 1 },
+            { action: "BUY", type: "PE", strike: buyNode.strike, price: buyNode.PE.ltp, greeks: buyNode.PE, qty: 2 }
+        ]
+    };
+}
+
+// --- 4. NEUTRAL & VOLATILITY ---
+
+function buildShortStraddle(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
     return {
         name: "Short Straddle",
         legs: [
-            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
-            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+            { action: "SELL", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 },
+            { action: "SELL", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }
         ]
     };
 }
-function longStraddle(chain, atm) {
+
+function buildLongStraddle(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
     return {
         name: "Long Straddle",
         legs: [
-            { action: "BUY", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
-            { action: "BUY", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
+            { action: "BUY", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 },
+            { action: "BUY", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }
         ]
     };
 }
-function shortStrangle(sellPut, sellCall) {
+
+function buildShortStrangle(chain, atmStrike, config) {
+    const sellPut = getStrikeByExactStrike(chain, atmStrike - config.width);
+    const sellCall = getStrikeByExactStrike(chain, atmStrike + config.width);
     return {
         name: "Short Strangle",
         legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE }
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE, qty: 1 },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE, qty: 1 }
         ]
     };
 }
-function longStrangle(buyPut, buyCall) {
+
+function buildLongStrangle(chain, atmStrike, config) {
+    const buyPut = getStrikeByExactStrike(chain, atmStrike - config.width);
+    const buyCall = getStrikeByExactStrike(chain, atmStrike + config.width);
     return {
         name: "Long Strangle",
         legs: [
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE, qty: 1 }
         ]
     };
 }
-function ironCondor(sellPut, buyPut, sellCall, buyCall) {
+
+function buildIronCondor(chain, atmStrike, config) {
+    const sellPut = getStrikeByExactStrike(chain, atmStrike - config.width);
+    const buyPut  = getStrikeByExactStrike(chain, atmStrike - (config.width * 2));
+    const sellCall = getStrikeByExactStrike(chain, atmStrike + config.width);
+    const buyCall  = getStrikeByExactStrike(chain, atmStrike + (config.width * 2));
     return {
         name: "Iron Condor",
         legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE },
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE, qty: 1 },
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE, qty: 1 },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE, qty: 1 }
         ]
     };
 }
-function ironButterfly(chain, atmIndex, buyPut, buyCall) {
-    const atm = chain[atmIndex];
+
+function buildIronButterfly(chain, atmStrike, config) {
+    const atmNode = getStrikeByExactStrike(chain, atmStrike);
+    const buyPut  = getStrikeByExactStrike(chain, atmStrike - config.width);
+    const buyCall = getStrikeByExactStrike(chain, atmStrike + config.width);
     return {
         name: "Iron Butterfly",
         legs: [
-            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE },
-            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE },
-            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
-            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE }
+            { action: "BUY", type: "PE", strike: buyPut.strike, price: buyPut.PE.ltp, greeks: buyPut.PE, qty: 1 },
+            { action: "SELL", type: "PE", strike: atmNode.strike, price: atmNode.PE.ltp, greeks: atmNode.PE, qty: 1 },
+            { action: "SELL", type: "CE", strike: atmNode.strike, price: atmNode.CE.ltp, greeks: atmNode.CE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE, qty: 1 }
         ]
     };
 }
-function callButterfly(chain, atmIndex) {
-    // Standard Butterfly: Buy 1 ITM Call, Sell 2 ATM Calls, Buy 1 OTM Call
-    const atm = chain[atmIndex];
-    const lower = chain[Math.max(0, atmIndex - 2)]; // 2 strikes down
-    const upper = chain[Math.min(chain.length - 1, atmIndex + 2)]; // 2 strikes up
+
+function buildCallButterfly(chain, atmStrike, config) {
+    // Buy 1 ITM (-2 Width), Sell 2 ATM, Buy 1 OTM (+2 Width)
+    const atmNode = getStrikeByExactStrike(chain, atmStrike);
+    const lowerNode = getStrikeByExactStrike(chain, atmStrike - (config.width * 2));
+    const upperNode = getStrikeByExactStrike(chain, atmStrike + (config.width * 2));
     return {
         name: "Call Butterfly",
         legs: [
-            { action: "BUY", type: "CE", strike: lower.strike, price: lower.CE.ltp, greeks: lower.CE, qty: 1 },
-            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE, qty: 2 },
-            { action: "BUY", type: "CE", strike: upper.strike, price: upper.CE.ltp, greeks: upper.CE, qty: 1 }
+            { action: "BUY", type: "CE", strike: lowerNode.strike, price: lowerNode.CE.ltp, greeks: lowerNode.CE, qty: 1 },
+            { action: "SELL", type: "CE", strike: atmNode.strike, price: atmNode.CE.ltp, greeks: atmNode.CE, qty: 2 },
+            { action: "BUY", type: "CE", strike: upperNode.strike, price: upperNode.CE.ltp, greeks: upperNode.CE, qty: 1 }
         ]
     };
 }
 
-// --- 4. STOCK + OPTION (HEDGING) ---
-function protectivePut(spot, chain, atmIndex) {
-    // Buy Stock + Buy ATM/OTM Put
-    const put = chain[atmIndex]; 
-    return {
-        name: "Protective Put",
-        legs: [
-            { action: "BUY", type: "STOCK", price: spot, qty: 1 }, // Virtual Stock Leg
-            { action: "BUY", type: "PE", strike: put.strike, price: put.PE.ltp, greeks: put.PE }
-        ]
-    };
-}
-function protectiveCall(spot, chain, atmIndex) { // Covered Call
-    const call = chain[Math.min(chain.length - 1, atmIndex + 2)]; // Sell OTM Call
-    return {
-        name: "Covered Call", // (Protective Call)
-        legs: [
-            { action: "BUY", type: "STOCK", price: spot, qty: 1 },
-            { action: "SELL", type: "CE", strike: call.strike, price: call.CE.ltp, greeks: call.CE }
-        ]
-    };
-}
-
-// --- 5. SYNTHETICS ---
-function syntheticLongStock(chain, atmIndex) {
-    // Buy Call + Sell Put (Same Strike)
-    const atm = chain[atmIndex];
-    return {
-        name: "Synthetic Long",
-        legs: [
-            { action: "BUY", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
-            { action: "SELL", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
-        ]
-    };
-}
-function syntheticShortStock(chain, atmIndex) {
-    // Sell Call + Buy Put (Same Strike)
-    const atm = chain[atmIndex];
-    return {
-        name: "Synthetic Short",
-        legs: [
-            { action: "SELL", type: "CE", strike: atm.strike, price: atm.CE.ltp, greeks: atm.CE },
-            { action: "BUY", type: "PE", strike: atm.strike, price: atm.PE.ltp, greeks: atm.PE }
-        ]
-    };
-}
-function jadeLizard(sellPut, sellCall, buyCall) {
+function buildJadeLizard(chain, atmStrike, config) {
+    const sellPut = getStrikeByExactStrike(chain, atmStrike - config.width);
+    const sellCall = getStrikeByExactStrike(chain, atmStrike + config.width);
+    const buyCall = getStrikeByExactStrike(chain, atmStrike + (config.width * 2));
     return {
         name: "Jade Lizard",
         legs: [
-            { action: "SELL", type: "PE", strike: sellPut.strike,  price: sellPut.PE.ltp, greeks: sellPut.PE },
-            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE },
-            { action: "BUY",  type: "CE", strike: buyCall.strike,  price: buyCall.CE.ltp, greeks: buyCall.CE }
+            { action: "SELL", type: "PE", strike: sellPut.strike, price: sellPut.PE.ltp, greeks: sellPut.PE, qty: 1 },
+            { action: "SELL", type: "CE", strike: sellCall.strike, price: sellCall.CE.ltp, greeks: sellCall.CE, qty: 1 },
+            { action: "BUY", type: "CE", strike: buyCall.strike, price: buyCall.CE.ltp, greeks: buyCall.CE, qty: 1 }
+        ]
+    };
+}
+
+// --- 5. SYNTHETICS & HEDGING ---
+
+function buildSyntheticLong(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
+    return {
+        name: "Synthetic Long",
+        legs: [
+            { action: "BUY", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 },
+            { action: "SELL", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }
+        ]
+    };
+}
+
+function buildSyntheticShort(chain, atmStrike) {
+    const node = getStrikeByExactStrike(chain, atmStrike);
+    return {
+        name: "Synthetic Short",
+        legs: [
+            { action: "SELL", type: "CE", strike: node.strike, price: node.CE.ltp, greeks: node.CE, qty: 1 },
+            { action: "BUY", type: "PE", strike: node.strike, price: node.PE.ltp, greeks: node.PE, qty: 1 }
+        ]
+    };
+}
+
+function buildProtectivePut(chain, spot, atmStrike) {
+    const putNode = getStrikeByExactStrike(chain, atmStrike);
+    return {
+        name: "Protective Put",
+        legs: [
+            { action: "BUY", type: "STOCK", price: spot, qty: 1 }, 
+            { action: "BUY", type: "PE", strike: putNode.strike, price: putNode.PE.ltp, greeks: putNode.PE, qty: 1 }
+        ]
+    };
+}
+
+function buildCoveredCall(chain, spot, atmStrike, config) {
+    // Buy Stock + Sell OTM Call
+    const callNode = getStrikeByExactStrike(chain, atmStrike + config.width);
+    return {
+        name: "Covered Call",
+        legs: [
+            { action: "BUY", type: "STOCK", price: spot, qty: 1 },
+            { action: "SELL", type: "CE", strike: callNode.strike, price: callNode.CE.ltp, greeks: callNode.CE, qty: 1 }
         ]
     };
 }
@@ -598,97 +694,79 @@ function improvedStrikeSelection(chain, spot, dte) {
 
 // 6. MAIN SELECTOR WRAPPER
 function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
-    // 1. Basic Validation
-    if (!spot || chain.length < 5) return { error: "Insufficient data for strategy." };
-
-    // ⚙️ SETTINGS: How many days counts as "Near Expiry"?
-    // Set to 3 to include Today + Next 3 Days
-    const NEAR_EXPIRY_DAYS = 3; 
-
-    // 2. Run Team Lead's Robust Strike Selector
-    const picks = improvedStrikeSelection(chain, spot, dte);
-    const { atmNode, atmIndex, sellPut, buyPut, sellCall, buyCall, expectedMove } = picks;
-
-    // Define Specific Wings
-    const ibBuyPut = chain[Math.max(0, atmIndex - 3)] || buyPut;
-    const ibBuyCall = chain[Math.min(chain.length - 1, atmIndex + 3)] || buyCall;
-    const strangleBuyPut = chain[Math.max(0, atmIndex - 5)] || buyPut;
-    const strangleBuyCall = chain[Math.min(chain.length - 1, atmIndex + 5)] || buyCall;
-
-    // 3. Build the COMPLETE Strategy List
-    const strategies = [];
-
-    // --- A. NEUTRAL / VOLATILITY ---
-    strategies.push(ironCondor(sellPut, buyPut, sellCall, buyCall));
-    strategies.push(ironButterfly(chain, atmIndex, ibBuyPut, ibBuyCall));
-    strategies.push(shortStraddle(chain, atmNode));
-    strategies.push(shortStrangle(sellPut, sellCall));
-    strategies.push(longStraddle(chain, atmNode));
-    strategies.push(longStrangle(strangleBuyPut, strangleBuyCall));
-    strategies.push(callButterfly(chain, atmIndex)); 
-
-    // --- B. BULLISH ---
-    strategies.push(bullPutSpread(sellPut, buyPut));    // Credit
-    strategies.push(bullCallSpread(atmNode, sellCall)); // Debit
-    strategies.push(jadeLizard(sellPut, sellCall, buyCall));
-    strategies.push(longCall(atmNode));
-    strategies.push(syntheticLongStock(chain, atmIndex)); 
-    strategies.push(protectiveCall(spot, chain, atmIndex)); 
-
-    // --- C. BEARISH ---
-    strategies.push(bearCallSpread(sellCall, buyCall)); // Credit
-    strategies.push(bearPutSpread(atmNode, sellPut));   // Debit
-    strategies.push(longPut(atmNode));
-    strategies.push(syntheticShortStock(chain, atmIndex)); 
-    strategies.push(protectivePut(spot, chain, atmIndex)); 
-
-    // 4. INTELLIGENT SELECTION
-    let chosenStrategy;
+    // 1. Validation
+    if (!spot || !chain || chain.length < 5) {
+        return { error: "Insufficient market data to build strategies." };
+    }
     
-    // Check if we are in the "Theta Zone"
-    const isNearExpiry = dte <= NEAR_EXPIRY_DAYS;
+    // 2. Get Symbol Specific Config (Widths & Intervals)
+    const symbol = chain[0].CE?.symbol || chain[0].PE?.symbol || "NIFTY";
+    const config = getSensibullConfig(symbol);
 
-    console.log(`🧠 AI Decision -> Signal: ${signal} | DTE: ${dte} | Near Expiry Mode: ${isNearExpiry}`);
+    // 3. Exact ATM Rounding Logic (Sensibull Style)
+    // Example: Nifty at 25620 rounds to 25600 (nearest 50)
+    const atmStrike = Math.round(spot / config.interval) * config.interval;
+    
+    // 4. Build COMPLETE Strategy List (All 20+)
+    const strategies = [];
+    
+    // --- A. BULLISH STRATEGIES ---
+    strategies.push(buildBullCallSpread(chain, atmStrike, config));
+    strategies.push(buildBullPutSpread(chain, atmStrike, config));
+    strategies.push(buildCallRatioBackSpread(chain, atmStrike, config));
+    strategies.push(buildLongCall(chain, atmStrike));
+    strategies.push(buildSyntheticLong(chain, atmStrike));
+    
+    // --- B. BEARISH STRATEGIES ---
+    strategies.push(buildBearPutSpread(chain, atmStrike, config));
+    strategies.push(buildBearCallSpread(chain, atmStrike, config));
+    strategies.push(buildPutRatioBackSpread(chain, atmStrike, config));
+    strategies.push(buildLongPut(chain, atmStrike));
+    strategies.push(buildSyntheticShort(chain, atmStrike));
+    
+    // --- C. NEUTRAL STRATEGIES ---
+    strategies.push(buildIronCondor(chain, atmStrike, config));
+    strategies.push(buildIronButterfly(chain, atmStrike, config));
+    strategies.push(buildShortStraddle(chain, atmStrike));
+    strategies.push(buildShortStrangle(chain, atmStrike, config));
+    strategies.push(buildJadeLizard(chain, atmStrike, config));
+    strategies.push(buildCallButterfly(chain, atmStrike, config));
 
+    // --- D. OTHER / VOLATILITY / HEDGING ---
+    strategies.push(buildLongStraddle(chain, atmStrike));
+    strategies.push(buildLongStrangle(chain, atmStrike, config));
+    strategies.push(buildProtectivePut(chain, spot, atmStrike));
+    strategies.push(buildCoveredCall(chain, spot, atmStrike, config));
+
+    // 5. Intelligent Recommendation Engine (Based on DTE)
+    // If Near Expiry (< 3 Days): Prefer Credit Strategies (Theta Gain)
+    // If Far Expiry (> 3 Days): Prefer Debit Strategies (Directional Play)
+    
+    const isNearExpiry = dte <= 3;
+    let chosenStrategyName = "";
+    
     if (signal === "BULL") {
-        if (isNearExpiry) {
-            // NEAR (0-3 Days): Sell Premium (Credit Spread)
-            chosenStrategy = strategies.find(s => s.name === "Bull Put Spread");
-        } else {
-            // FAR (>3 Days): Buy Premium (Debit Spread)
-            chosenStrategy = strategies.find(s => s.name === "Bull Call Spread");
-        }
-    } 
-    else if (signal === "BEAR") {
-        if (isNearExpiry) {
-            // NEAR: Sell Premium (Credit Spread)
-            chosenStrategy = strategies.find(s => s.name === "Bear Call Spread");
-        } else {
-            // FAR: Buy Premium (Debit Spread)
-            chosenStrategy = strategies.find(s => s.name === "Bear Put Spread");
-        }
-    } 
-    else {
+        chosenStrategyName = isNearExpiry ? "Bull Put Spread" : "Bull Call Spread";
+    } else if (signal === "BEAR") {
+        chosenStrategyName = isNearExpiry ? "Bear Call Spread" : "Bear Put Spread";
+    } else { 
         // NEUTRAL
-        if (isNearExpiry) {
-            // NEAR: Iron Butterfly (Aggressive Theta Collection)
-            chosenStrategy = strategies.find(s => s.name === "Iron Butterfly");
-        } else {
-            // FAR: Iron Condor (Wider Safety Range)
-            chosenStrategy = strategies.find(s => s.name === "Iron Condor");
-        }
+        chosenStrategyName = isNearExpiry ? "Iron Butterfly" : "Iron Condor"; 
     }
 
+    // Find the object for the chosen strategy
+    const chosenStrategy = strategies.find(s => s.name === chosenStrategyName) || strategies[0];
+
+    // 6. Return Data Bundle
     return {
         spot,
-        atmStrike: atmNode.strike,
-        expectedMove: expectedMove,
-        sellPut: sellPut.strike,
-        buyPut: buyPut.strike,
-        sellCall: sellCall.strike,
-        buyCall: buyCall.strike,
-        chosenStrategy,
-        strategies
+        atmStrike,
+        daysToExpiry: dte,
+        configUsed: config,       
+        marketCondition: signal,
+        recommendationReason: isNearExpiry ? "Near Expiry (Theta Play)" : "Far Expiry (Directional Play)",
+        chosenStrategy,           
+        strategies                // Array of ALL generated strategies
     };
 }
 // ==================================================================
