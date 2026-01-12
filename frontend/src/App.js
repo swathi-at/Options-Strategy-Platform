@@ -15,7 +15,8 @@ const WS_URL = 'ws://localhost:8080';
 const getSymbolKey = (symbol) => {
     if (!symbol) return null;
     if (SYMBOL_CONFIG_KEY_MAP[symbol]) return SYMBOL_CONFIG_KEY_MAP[symbol];
-    if (symbol.includes('NSE:') && symbol.includes('-EQ')) {
+    // Handle NSE:RELIANCE-EQ or NSE:TCS logic
+    if (symbol.includes(':')) {
         return symbol.split(':')[1].replace('-EQ', '');
     }
     return symbol;
@@ -64,7 +65,7 @@ const strategyGroups = [
             { value: 'bull-call-spread', name: 'Bull Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'bull-put-spread', name: 'Bull Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'call-ratio-spread', name: 'Call Ratio Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
-            { value: 'jade-lizard', name: 'Jade Lizard', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, // New
+            { value: 'jade-lizard', name: 'Jade Lizard', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, 
             { value: 'synthetic-long-stock', name: 'Synthetic Long', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
             { value: 'protective-call', name: 'Covered Call', fields: ['stockPrice', 'strike', 'premium', 'lots', 'lotSize'] },
         ]
@@ -73,7 +74,7 @@ const strategyGroups = [
         label: "Bearish Strategies",
         options: [
             { value: 'long-put', name: 'Long Put', fields: ['strike', 'premium', 'lots', 'lotSize'] },
-            { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] }, // Added
+            { value: 'short-call', name: 'Short Call', fields: ['strike', 'premium', 'lots', 'lotSize'] }, 
             { value: 'bear-put-spread', name: 'Bear Put Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'bear-call-spread', name: 'Bear Call Spread', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'synthetic-short-stock', name: 'Synthetic Short', fields: ['strike', 'premium', 'premium2', 'lots', 'lotSize'] },
@@ -89,7 +90,7 @@ const strategyGroups = [
             { value: 'long-strangle', name: 'Long Strangle', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'lots', 'lotSize'] },
             { value: 'iron-condor', name: 'Iron Condor', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'strike4', 'premium4', 'lots', 'lotSize'] },
             { value: 'iron-butterfly', name: 'Iron Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'premium3', 'strike3', 'premium4', 'lots', 'lotSize'] },
-            { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, // New
+            { value: 'call-butterfly', name: 'Call Butterfly', fields: ['strike1', 'premium1', 'strike2', 'premium2', 'strike3', 'premium3', 'lots', 'lotSize'] }, 
         ]
     }
 ];
@@ -122,13 +123,10 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
 
     try {
         switch (strategy) {
-            // --- SINGLE LEG ---
             case 'long-call': tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots }); break;
             case 'short-call': tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots }); break;
             case 'long-put': tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
             case 'short-put': tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots }); break;
-
-            // --- SPREADS ---
             case 'bull-call-spread':
                 tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); break;
@@ -141,23 +139,16 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
             case 'bear-put-spread':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots }); break;
-            
-            // --- RATIOS / COMPLEX ---
             case 'call-ratio-spread':
                 tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots * 2 }); break;
             case 'jade-lizard':
-                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots }); // OTM Put
-                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); // OTM Call
-                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots });  // Far OTM Call
+                tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'SELL', qty: lots }); 
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); 
+                tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots }); 
                 break;
-
-            // --- NEUTRAL ---
             case 'long-straddle':
-            case 'short-straddle': // Logic identical, just Action flips (handled in backend if manual trade is simple)
-                // For simplicity in manual builder, we just send both legs.
-                // NOTE: For Short Straddle manual entry, user usually inputs positive premium. 
-                // We map strictly based on strategy name logic here:
+            case 'short-straddle': 
                 const actionStraddle = strategy === 'long-straddle' ? 'BUY' : 'SELL';
                 tradeLegs.push({ strike: form.strike, optionType: 'CE', action: actionStraddle, qty: lots });
                 tradeLegs.push({ strike: form.strike, optionType: 'PE', action: actionStraddle, qty: lots }); 
@@ -168,8 +159,6 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
             case 'long-strangle':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'BUY', qty: lots }); break;
-            
-            // --- BUTTERFLIES / CONDORS ---
             case 'iron-condor':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
@@ -178,21 +167,18 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
             case 'iron-butterfly':
                 tradeLegs.push({ strike: form.strike1, optionType: 'PE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'PE', action: 'SELL', qty: lots });
-                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); // Same strike for body
+                tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots }); 
                 tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots }); break;
             case 'call-butterfly':
                 tradeLegs.push({ strike: form.strike1, optionType: 'CE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike2, optionType: 'CE', action: 'SELL', qty: lots * 2 });
                 tradeLegs.push({ strike: form.strike3, optionType: 'CE', action: 'BUY', qty: lots }); break;
-
-            // --- SYNTHETICS ---
             case 'synthetic-long-stock':
                 tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'BUY', qty: lots });
                 tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'SELL', qty: lots }); break;
             case 'synthetic-short-stock':
                 tradeLegs.push({ strike: form.strike, optionType: 'CE', action: 'SELL', qty: lots });
                 tradeLegs.push({ strike: form.strike, optionType: 'PE', action: 'BUY', qty: lots }); break;
-
             default: return null;
         }
     } catch (error) {
@@ -209,61 +195,68 @@ const translateFormToTrade = (strategy, form, currentSymbol) => {
     };
 };
 
+// --- FIX: Dynamic ATM finding for stocks ---
 const findAtmStrike = (spot, symbolKey) => {
     const resolvedKey = getSymbolKey(symbolKey);
-    const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50; 
+    let increment = 50; // Default for Nifty
+
+    // Try to get explicit increment from constants
+    if (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) {
+        increment = SYMBOL_STRIKE_INCREMENT[resolvedKey];
+    } else {
+        // Fallback for Stocks not in config: Estimate increment based on price
+        if (spot < 500) increment = 5;
+        else if (spot < 1500) increment = 10;
+        else if (spot < 5000) increment = 20;
+        else increment = 50;
+    }
+    
     return Math.round(spot / increment) * increment;
 };
 
 const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolKey) => {
     const newForm = { ...currentForm };
     const resolvedKey = getSymbolKey(symbolKey);
-    const increment = (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) ? SYMBOL_STRIKE_INCREMENT[resolvedKey] : 50;
+    // Reuse logic from findAtmStrike for increment consistency
+    let increment = 50;
+    if (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) {
+        increment = SYMBOL_STRIKE_INCREMENT[resolvedKey];
+    } else {
+         if (atmStrike < 500) increment = 5;
+         else if (atmStrike < 1500) increment = 10;
+         else if (atmStrike < 5000) increment = 20;
+    }
 
     switch (currentStrategy) {
-        // ATM Strategies
         case 'long-call': case 'long-put': case 'short-call': case 'short-put': 
         case 'long-straddle': case 'short-straddle': 
         case 'synthetic-long-stock': case 'synthetic-short-stock': 
         case 'calendar-spread':
             newForm.strike = atmStrike; break;
-        
-        // Vertical Spreads (1 step width)
         case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
             newForm.strike1 = atmStrike; newForm.strike2 = atmStrike + increment; break;
         case 'bull-put-spread': case 'bear-put-spread':
             newForm.strike1 = atmStrike; newForm.strike2 = atmStrike - increment; break;
-        
-        // Strangles (1 step OTM)
         case 'long-strangle': case 'short-strangle':
             newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike + increment; break;
-        
-        // Butterflies (Body at ATM, Wings 1 step out)
         case 'call-butterfly': case 'iron-butterfly':
-            newForm.strike1 = atmStrike - increment; // Lower Wing
-            newForm.strike2 = atmStrike;             // Body
-            newForm.strike3 = atmStrike + increment; // Upper Wing
+            newForm.strike1 = atmStrike - increment; 
+            newForm.strike2 = atmStrike;            
+            newForm.strike3 = atmStrike + increment; 
             break;
-        
-        // Jade Lizard (Sell OTM Put, Sell OTM Call, Buy Far OTM Call)
         case 'jade-lizard':
-            newForm.strike1 = atmStrike - increment;       // Sell Put
-            newForm.strike2 = atmStrike + increment;       // Sell Call
-            newForm.strike3 = atmStrike + (2 * increment); // Buy Call
+            newForm.strike1 = atmStrike - increment;       
+            newForm.strike2 = atmStrike + increment;       
+            newForm.strike3 = atmStrike + (2 * increment); 
             break;
-
-        // Iron Condor (Body 1 step OTM, Wings 2 steps OTM)
         case 'iron-condor':
             newForm.strike1 = atmStrike - (2 * increment); 
             newForm.strike2 = atmStrike - increment;
             newForm.strike3 = atmStrike + increment; 
             newForm.strike4 = atmStrike + (2 * increment); 
             break;
-        
-        // Stock Strategies
         case 'protective-put': case 'protective-call':
             newForm.stockPrice = atmStrike; newForm.strike = atmStrike; break;
-            
         default: break;
     }
     return newForm;
@@ -274,7 +267,7 @@ function App() {
 
     const defaultFormState = {
         lots: 1,
-        lotSize: SYMBOL_LOT_SIZES['NIFTY'], 
+        lotSize: SYMBOL_LOT_SIZES['NIFTY'] || 25, 
         targetPercent: 20,
         slPercent: -10
     };
@@ -305,28 +298,23 @@ function App() {
         document.documentElement.classList.toggle('dark', theme === 'dark');
     }, [theme]);
     const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
+
     useEffect(() => {
-        // Only run if we are in Live Mode and have valid data
         if (isLiveMode && liveData) {
-            
-            // 1. Find ATM Strike for current Spot
             const symbolKey = liveData.symbol || symbol;
             const atmStrike = findAtmStrike(liveData.spot, symbolKey);
             
-            // 2. Update Strikes based on Strategy (e.g. Iron Condor needs 4 strikes)
             let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
             
-            // 3. Update Premiums from the new Option Chain
             if (liveData.options && liveData.options.length > 0) {
                 newForm = updateAllPremiums(newForm, strategy, liveData);
             }
 
-            // 4. Update Lot Size
+            // Always update lot size if backend sends it, otherwise keep existing
             if (liveData.lotSize) {
                 newForm.lotSize = liveData.lotSize;
             }
 
-            // 5. Update State
             setForm(newForm);
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -347,7 +335,7 @@ function App() {
                     } else {
                         newData.push(msg.candle); 
                     }
-                    return newData.slice(-60); // Keep last 60 candles
+                    return newData.slice(-60); 
                 });
             }
             if (msg.type === 'PNL_UPDATE') setLivePnl(msg);
@@ -359,8 +347,6 @@ function App() {
         return () => ws.close();
     }, []);
 
-    // --- PREMIUM AUTO-FILLER (UPDATED FOR NESTED STRUCTURE) ---
-    // --- AUTO-FILL PREMIUMS FROM LIVE DATA ---
     const updateAllPremiums = useCallback((currentForm, currentStrategy, currentSymbolData) => {
         if (!currentSymbolData || !currentSymbolData.options) return currentForm;
         
@@ -380,53 +366,37 @@ function App() {
         }
 
         switch (currentStrategy) {
-            // Single Leg
             case 'long-call': case 'short-call': newForm.premium = findPrice(newForm.strike, 'CE'); break;
             case 'long-put': case 'short-put': newForm.premium = findPrice(newForm.strike, 'PE'); break;
-            
-            // Stock
             case 'protective-put': newForm.premium = findPrice(newForm.strike, 'PE'); break;
             case 'protective-call': newForm.premium = findPrice(newForm.strike, 'CE'); break;
-
-            // Call Spreads / Ratios
             case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
                 newForm.premium1 = findPrice(newForm.strike1, 'CE'); 
                 newForm.premium2 = findPrice(newForm.strike2, 'CE'); break;
-            
-            // Put Spreads
             case 'bull-put-spread': case 'bear-put-spread':
                 newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
                 newForm.premium2 = findPrice(newForm.strike2, 'PE'); break;
-
-            // Straddles / Synthetics (Mixed)
             case 'short-straddle': case 'long-straddle': 
             case 'synthetic-long-stock': case 'synthetic-short-stock':
-                newForm.premium1 = findPrice(newForm.strike, 'CE'); // Usually CE
-                newForm.premium2 = findPrice(newForm.strike, 'PE'); // Usually PE
-                // Handle legacy single-field mapping if needed:
+                newForm.premium1 = findPrice(newForm.strike, 'CE'); 
+                newForm.premium2 = findPrice(newForm.strike, 'PE'); 
                 if (currentStrategy.includes('synthetic')) {
                     newForm.premium = findPrice(newForm.strike, 'CE'); 
                     newForm.premium2 = findPrice(newForm.strike, 'PE'); 
                 }
                 break;
-
-            // Strangles
             case 'short-strangle': case 'long-strangle':
                 newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
                 newForm.premium2 = findPrice(newForm.strike2, 'CE'); break;
-
-            // 3-Leg Strategies
             case 'call-butterfly':
                 newForm.premium1 = findPrice(newForm.strike1, 'CE');
                 newForm.premium2 = findPrice(newForm.strike2, 'CE');
                 newForm.premium3 = findPrice(newForm.strike3, 'CE'); break;
             case 'jade-lizard':
-                newForm.premium1 = findPrice(newForm.strike1, 'PE'); // Sell Put
-                newForm.premium2 = findPrice(newForm.strike2, 'CE'); // Sell Call
-                newForm.premium3 = findPrice(newForm.strike3, 'CE'); // Buy Call
+                newForm.premium1 = findPrice(newForm.strike1, 'PE');
+                newForm.premium2 = findPrice(newForm.strike2, 'CE');
+                newForm.premium3 = findPrice(newForm.strike3, 'CE');
                 break;
-
-            // 4-Leg Strategies
             case 'iron-condor':
                 newForm.premium1 = findPrice(newForm.strike1, 'PE'); 
                 newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
@@ -437,13 +407,11 @@ function App() {
                 newForm.premium2 = findPrice(newForm.strike2, 'PE'); 
                 newForm.premium3 = findPrice(newForm.strike2, 'CE'); 
                 newForm.premium4 = findPrice(newForm.strike3, 'CE'); break;
-
             default: break;
         }
         return newForm;
     }, []);
 
-    // --- LIVE DATA FETCH ---
     const fetchLiveData = async () => {
         setLiveDataLoading(true); setLiveDataError(null);
         try {
@@ -451,12 +419,10 @@ function App() {
             const liveApiData = res.data;
             setLiveData(liveApiData);
 
-            // Auto-Fill Manual Builder
             const symbolKey = liveApiData.symbol; 
             const atmStrike = findAtmStrike(liveApiData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(form, strategy, atmStrike, symbolKey);
             
-            // Grab Lot Size from backend response
             if (liveApiData.lotSize) {
                 newForm.lotSize = liveApiData.lotSize;
             }
@@ -483,15 +449,12 @@ function App() {
         }
     };
 
-    // --- AUTO DEPLOY (PHASE 4 CORE) ---
     const handleAutoDeploy = async () => {
         if (!liveData) { alert("Please start Live Greeks mode first."); return; }
         try {
-            // 1. Get Decision
             const res = await axios.post(`${BACKEND_URL}/api/decide-and-build-order`, { symbol, signal: signalStrength });
             setDecisionResult(res.data);
             
-            // 2. Execute Trade (Auto)
             if (res.data.decision === 'PLACE') {
                 const execRes = await axios.post(`${BACKEND_URL}/api/execute-trade`, { 
                     strategy: res.data.strategy, 
@@ -509,13 +472,12 @@ function App() {
         }
     };
 
-    // --- HANDLERS ---
     const handleSymbolChange = (e) => {
         const newSymbol = e.target.value;
         setSymbol(newSymbol);
         
-        // --- FIX FOR SENSEX/STOCKS ---
-        const configKey = getSymbolKey(newSymbol); // Use helper function
+        const configKey = getSymbolKey(newSymbol);
+        // FIX: If lot size isn't known, default to 1, don't set it to 0 or null
         const newLotSize = (configKey && SYMBOL_LOT_SIZES[configKey]) ? SYMBOL_LOT_SIZES[configKey] : 1;
         
         setForm({ ...defaultFormState, lotSize: newLotSize });
@@ -532,7 +494,6 @@ function App() {
             const atmStrike = findAtmStrike(liveData.spot, symbolKey);
             let newForm = autoFillPrimaryStrikes(defaultFormState, newStrategy, atmStrike, symbolKey);
             
-            // Grab Lot Size from liveData when switching strategies
             if (liveData.lotSize) {
                 newForm.lotSize = liveData.lotSize;
             }
@@ -599,7 +560,6 @@ function App() {
 
     const formatValue = (value) => (typeof value === 'number') ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value;
 
-    // --- RENDER GREEKS TABLE (UPDATED FOR NESTED STRUCTURE) ---
     const renderGreeksTable = () => {
         if (!liveData || !liveData.options) return null;
         const atmIndex = liveData.options.reduce((closestIdx, opt, idx, arr) => Math.abs(opt.strike - liveData.spot) < Math.abs(arr[closestIdx].strike - liveData.spot) ? idx : closestIdx, 0);
@@ -619,13 +579,10 @@ function App() {
                     <tbody>
                         {subset.map(row => (
                             <tr key={row.strike} className={row.strike === liveData.options[atmIndex].strike ? "bg-blue-50 dark:bg-blue-900/30 font-bold" : "border-b dark:border-gray-700"}>
-                                {/* Using Optional Chaining for new structure */}
                                 <td className="p-2 text-green-600">{row.CE?.delta?.toFixed(2) || '-'}</td>
                                 <td className="p-2">{row.CE?.gamma?.toFixed(4) || '-'}</td>
                                 <td className="p-2 text-red-500">{row.CE?.theta?.toFixed(1) || '-'}</td>
-                                
                                 <td className="p-2 font-bold">{row.strike}</td>
-                                
                                 <td className="p-2 text-red-600">{row.PE?.delta?.toFixed(2) || '-'}</td>
                                 <td className="p-2">{row.PE?.gamma?.toFixed(4) || '-'}</td>
                                 <td className="p-2 text-red-500">{row.PE?.theta?.toFixed(1) || '-'}</td>
@@ -637,10 +594,6 @@ function App() {
         );
     };
 
-    // --- REPLACED BUGGY DIRECT LOOKUP WITH HELPER ---
-    const resolvedConfigKey = getSymbolKey(symbol);
-    const hasValidConfig = !!(resolvedConfigKey && SYMBOL_LOT_SIZES[resolvedConfigKey]);
-
     return (
         <div className="p-4 md:p-8 max-w-7xl mx-auto font-sans bg-gray-50 dark:bg-gray-900 min-h-screen">
             <div className="flex justify-between items-center mb-6">
@@ -650,10 +603,8 @@ function App() {
 
             <AlgoDashboard />
 
-            {/* --- PHASE 4 DEPLOYMENT PANEL --- */}
             <div className="p-6 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg mb-8 shadow-sm">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* LEFT: CONTROLS */}
                     <div className="space-y-4">
                         <div className="flex flex-col md:flex-row justify-between items-start md:items-center">
                             <div>
@@ -692,18 +643,15 @@ function App() {
                             </button>
                         </div>
 
-                        {/* DECISION & PNL DISPLAY */}
                         <div className="space-y-2 mt-4">
                             {decisionResult && (
                                 <div className="p-4 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
-                                    {/* Header: Decision & Score */}
                                     <div className="flex justify-between items-center mb-3 border-b border-gray-100 dark:border-gray-700 pb-2">
                                         <span className={`font-bold px-2 py-1 rounded text-xs uppercase ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                             {decisionResult.decision}
                                         </span>
                                         <div className="text-right">
                                             <span className="text-xs text-gray-500 block">Score: {decisionResult.score || 0}</span>
-                                            {/* Show Expiry Info if available */}
                                             {liveData && liveData.daysToExpiry !== undefined && (
                                                 <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
                                                     Expiry: {liveData.expiryDate || 'N/A'} ({liveData.daysToExpiry} Days)
@@ -711,15 +659,11 @@ function App() {
                                             )}
                                         </div>
                                     </div>
-
-                                    {/* Strategy Name */}
                                     {decisionResult.strategy && (
                                         <p className="font-bold text-lg text-gray-800 dark:text-gray-100 mb-2">
                                             {decisionResult.strategy}
                                         </p>
                                     )}
-
-                                    {/* --- NEW: STRIKE PRICE BREAKDOWN --- */}
                                     {decisionResult.legs && decisionResult.legs.length > 0 ? (
                                         <div className="bg-gray-50 dark:bg-gray-700/50 rounded p-2 mb-2">
                                             <p className="text-xs font-bold text-gray-500 mb-1 uppercase tracking-wide">Selected Strikes</p>
@@ -742,8 +686,6 @@ function App() {
                                     ) : (
                                         decisionResult.decision === 'SKIP' && <p className="text-red-500 italic text-xs">{decisionResult.reason}</p>
                                     )}
-                                    
-                                    {/* Expected Move Info */}
                                     {decisionResult.expectedMove && (
                                         <div className="mt-2 text-xs text-gray-500 flex justify-between border-t dark:border-gray-700 pt-2">
                                             <span>Spot: {decisionResult.spot}</span>
@@ -768,18 +710,15 @@ function App() {
                         </div>
                     </div>
 
-                    {/* RIGHT: LIVE CHART */}
                     <div>
                          <LiveCandleChart data={candleData} />
                     </div>
                 </div>
             </div>
 
-            {/* --- GREEKS TABLE --- */}
             {isLiveMode && renderGreeksTable()}
             {liveDataError && <p className="text-red-500 text-sm mt-2 text-center">{liveDataError}</p>}
 
-            {/* --- MANUAL BUILDER (Existing) --- */}
             <div className="mt-8 p-6 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-md mb-8">
                 <div className="flex justify-between items-center mb-4 border-b dark:border-gray-600 pb-2">
                     <h2 className="text-xl font-semibold text-gray-700 dark:text-gray-200">Manual Strategy Builder</h2>
@@ -789,7 +728,6 @@ function App() {
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
                     <div className="col-span-2 md:col-span-1">
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Symbol</label>
-                        {/* Sync Manual Dropdown with Live Mode Dropdown */}
                         <select value={symbol} onChange={handleSymbolChange} disabled={isLiveMode} className="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
                              {Object.entries(SYMBOL_LIST).map(([cat, items]) => (
                                 <optgroup label={cat} key={cat}>
@@ -805,22 +743,15 @@ function App() {
                         </select>
                     </div>
                     
-                    {strategy && strategyConfigs[strategy]?.fields.map(field => {
-                        // FIX: Use the resolved boolean (from getSymbolKey) to allow showing inputs for SENSEX/Stocks
-                        if (field === 'lotSize' && !hasValidConfig) return null;
-                        // For fields like premium and strike, we check if lot size is available generally,
-                        // otherwise fallback to manual entry if user wants (removed strict check for stocks)
-                        if (!hasValidConfig && (field.startsWith('premium') || field.startsWith('strike') || field === 'stockPrice')) return null;
-                        
-                        return (
-                            <div key={field} className="col-span-1">
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{formatLabel(field, strategy)}</label>
-                                <input type="number" name={field} value={form[field] || ''} onChange={handleChange} 
-                                    disabled={(isLiveMode && field.startsWith('premium'))}
-                                    className={`w-full p-2 border rounded dark:bg-gray-700 dark:text-white ${isLiveMode && field.startsWith('premium') ? 'bg-gray-100 dark:bg-gray-600' : ''}`} placeholder="0" />
-                            </div>
-                        )
-                    })}
+                    {/* --- FIXED: REMOVED "hasValidConfig" check so STOCKS always show inputs --- */}
+                    {strategy && strategyConfigs[strategy]?.fields.map(field => (
+                         <div key={field} className="col-span-1">
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{formatLabel(field, strategy)}</label>
+                            <input type="number" name={field} value={form[field] || ''} onChange={handleChange} 
+                                disabled={(isLiveMode && field.startsWith('premium'))}
+                                className={`w-full p-2 border rounded dark:bg-gray-700 dark:text-white ${isLiveMode && field.startsWith('premium') ? 'bg-gray-100 dark:bg-gray-600' : ''}`} placeholder="0" />
+                        </div>
+                    ))}
 
                     <div className="col-span-2 flex space-x-2">
                         <button onClick={handleSubmit} disabled={isLoading} className={`w-full px-4 py-2 rounded text-white font-semibold ${data ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
@@ -838,8 +769,7 @@ function App() {
                     <div className="flex justify-between items-center mb-6 border-b pb-2">
                         <h2 className="text-xl font-semibold dark:text-gray-200">Results</h2>
                         <div className="flex space-x-2">
-                            {/* FIX: Use resolved boolean here too */}
-                            {hasValidConfig && <button onClick={handleSimulateTrade} className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">📈 Simulate Trade</button>}
+                            <button onClick={handleSimulateTrade} className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">📈 Simulate Trade</button>
                             <button onClick={handleAnalysis} disabled={isAnalyzing} className="bg-purple-600 text-white px-3 py-1 rounded hover:bg-purple-700">{isAnalyzing ? '...' : '✨ Analyze'}</button>
                         </div>
                     </div>
