@@ -291,7 +291,7 @@ function App() {
     const [decisionResult, setDecisionResult] = useState(null); 
     const [signalStrength, setSignalStrength] = useState({ direction: 'BULL', strength: 'MODERATE' }); 
     const [candleData, setCandleData] = useState([]);
-    const [livePnl, setLivePnl] = useState(null);
+    const [activeTrades, setActiveTrades] = useState({});
 
     // --- THEME & WEBSOCKET ---
     useEffect(() => {
@@ -325,23 +325,24 @@ function App() {
         ws.onopen = () => console.log('Connected to UI Stream');
         ws.onmessage = (event) => {
             const msg = JSON.parse(event.data);
+
             if (msg.type === 'HISTORY') setCandleData(msg.data);
+            
             if (msg.type === 'CANDLE_CLOSE' || msg.type === 'TICK') {
-                setCandleData(prev => {
-                    const newData = [...prev];
-                    const lastIdx = newData.length - 1;
-                    if (lastIdx >= 0 && newData[lastIdx].time === msg.candle.time) {
-                        newData[lastIdx] = msg.candle; 
-                    } else {
-                        newData.push(msg.candle); 
-                    }
-                    return newData.slice(-60); 
-                });
+                // ... (Keep your existing candle logic here) ...
             }
-            if (msg.type === 'PNL_UPDATE') setLivePnl(msg);
+
+            // NEW: Handle Multiple Trades P&L
+            if (msg.type === 'PNL_UPDATE') {
+                setActiveTrades(prev => ({
+                    ...prev,
+                    [msg.tradeId]: msg // Update specific trade by its ID
+                }));
+            }
+
             if (msg.type === 'TRADE_CLOSE') {
-                alert(msg.message);
-                setLivePnl(null);
+                // Optional: You could remove it from the list here if you parsed the ID
+                alert(msg.message); 
             }
         };
         return () => ws.close();
@@ -452,23 +453,46 @@ function App() {
     const handleAutoDeploy = async () => {
         if (!liveData) { alert("Please start Live Greeks mode first."); return; }
         try {
+            // 1. Get Recommendations (List of Strategies)
             const res = await axios.post(`${BACKEND_URL}/api/decide-and-build-order`, { symbol, signal: signalStrength });
             setDecisionResult(res.data);
             
-            if (res.data.decision === 'PLACE') {
-                const execRes = await axios.post(`${BACKEND_URL}/api/execute-trade`, { 
-                    strategy: res.data.strategy, 
-                    decisionData: res.data 
-                });
-                if(execRes.data.success) {
-                    alert("✅ Auto-Trade Executed! Risk Manager is now monitoring.");
-                }
+            // REMOVED: Immediate execution logic. 
+            // We now let the user choose which strategy to run from the UI.
+            if (res.data.recommendedStrategies && res.data.recommendedStrategies.length > 0) {
+                // Optional: Scroll to results or show a toast
+                console.log("Strategies received:", res.data.recommendedStrategies);
             } else {
-                alert(`Engine Skipped: ${res.data.reason}`);
+                alert(`Engine Skipped: ${res.data.reason || 'No strategies found'}`);
             }
         } catch (e) {
             console.error(e);
-            alert("Deployment failed. Check console.");
+            alert("Deployment engine failed. Check console.");
+        }
+    };
+
+    const handleExecuteSpecificStrategy = async (strategyObj) => {
+        // FIX: Added 'window.' before confirm to satisfy ESLint
+        if (!window.confirm(`Execute ${strategyObj.name} now?`)) return;
+
+        try {
+            const payload = { 
+                strategy: strategyObj.name, 
+                decisionData: { 
+                    legs: strategyObj.legs,
+                    symbol: symbol 
+                } 
+            };
+
+            const execRes = await axios.post(`${BACKEND_URL}/api/execute-trade`, payload);
+            
+            if(execRes.data.success) {
+                // FIX: Used window.alert just to be safe, though alert is sometimes lenient
+                window.alert(`✅ Trade Executed: ${strategyObj.name}\nIDs: ${execRes.data.positions.map(p => p.orderId).join(", ")}`);
+            }
+        } catch (e) {
+            console.error(e);
+            window.alert("Execution failed: " + (e.response?.data?.error || e.message));
         }
     };
 
@@ -481,7 +505,7 @@ function App() {
         const newLotSize = (configKey && SYMBOL_LOT_SIZES[configKey]) ? SYMBOL_LOT_SIZES[configKey] : 1;
         
         setForm({ ...defaultFormState, lotSize: newLotSize });
-        setData(null); setError(null); setAnalysis(""); setIsLiveMode(false); setLiveData(null); setDecisionResult(null); setLivePnl(null);
+        setData(null); setError(null); setAnalysis(""); setIsLiveMode(false); setLiveData(null); setDecisionResult(null); setActiveTrades({});
     };
 
     const handleStrategyChange = (e) => {
@@ -516,7 +540,7 @@ function App() {
 
     const handleReset = () => {
         setForm(defaultFormState);
-        setData(null); setError(null); setAnalysis(""); setDecisionResult(null); setLivePnl(null);
+        setData(null); setError(null); setAnalysis(""); setDecisionResult(null); setActiveTrades({});
     };
 
     const handleSubmit = async () => {
@@ -644,66 +668,119 @@ function App() {
                         </div>
 
                         <div className="space-y-2 mt-4">
-                            {decisionResult && (
-                                <div className="p-4 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
-                                    <div className="flex justify-between items-center mb-3 border-b border-gray-100 dark:border-gray-700 pb-2">
-                                        <span className={`font-bold px-2 py-1 rounded text-xs uppercase ${decisionResult.decision === 'PLACE' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                            {decisionResult.decision}
-                                        </span>
-                                        <div className="text-right">
-                                            <span className="text-xs text-gray-500 block">Score: {decisionResult.score || 0}</span>
-                                            {liveData && liveData.daysToExpiry !== undefined && (
-                                                <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                                                    Expiry: {liveData.expiryDate || 'N/A'} ({liveData.daysToExpiry} Days)
-                                                </span>
-                                            )}
-                                        </div>
+                        {decisionResult && (
+                            <div className="p-4 bg-white dark:bg-gray-800 rounded border border-l-4 border-indigo-500 shadow-sm text-sm">
+                                <div className="flex justify-between items-center mb-3 border-b border-gray-100 dark:border-gray-700 pb-2">
+                                    <span className="font-bold text-lg text-indigo-700 dark:text-indigo-300">
+                                        Recommendations ({decisionResult.marketCondition})
+                                    </span>
+                                    <div className="text-right">
+                                        <span className="text-xs text-gray-500 block">Score: {decisionResult.score || 0}</span>
+                                        {liveData && liveData.daysToExpiry !== undefined && (
+                                            <span className="text-xs font-semibold text-gray-500">
+                                                Expiry: {liveData.expiryDate} ({liveData.daysToExpiry} Days)
+                                            </span>
+                                        )}
                                     </div>
-                                    {decisionResult.strategy && (
-                                        <p className="font-bold text-lg text-gray-800 dark:text-gray-100 mb-2">
-                                            {decisionResult.strategy}
-                                        </p>
-                                    )}
-                                    {decisionResult.legs && decisionResult.legs.length > 0 ? (
-                                        <div className="bg-gray-50 dark:bg-gray-700/50 rounded p-2 mb-2">
-                                            <p className="text-xs font-bold text-gray-500 mb-1 uppercase tracking-wide">Selected Strikes</p>
-                                            <div className="grid grid-cols-1 gap-1">
-                                                {decisionResult.legs.map((leg, idx) => (
-                                                    <div key={idx} className="flex justify-between items-center bg-white dark:bg-gray-800 px-2 py-1 rounded border dark:border-gray-600">
-                                                        <span className={`text-xs font-bold w-12 ${leg.action === 'BUY' ? 'text-green-600' : 'text-red-500'}`}>
-                                                            {leg.action}
-                                                        </span>
-                                                        <span className="text-xs font-mono font-medium text-gray-700 dark:text-gray-200 flex-1 text-center">
-                                                            {leg.strike} {leg.optionType || leg.type}
-                                                        </span>
-                                                        <span className="text-xs text-gray-400 w-16 text-right">
-                                                            ₹{leg.price || leg.greeks?.ltp || '?'}
-                                                        </span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        decisionResult.decision === 'SKIP' && <p className="text-red-500 italic text-xs">{decisionResult.reason}</p>
-                                    )}
-                                    {decisionResult.expectedMove && (
-                                        <div className="mt-2 text-xs text-gray-500 flex justify-between border-t dark:border-gray-700 pt-2">
-                                            <span>Spot: {decisionResult.spot}</span>
-                                            <span>Expected Move: ±{decisionResult.expectedMove}</span>
-                                        </div>
-                                    )}
                                 </div>
-                            )}
 
-                            {livePnl && (
-                                <div className={`p-3 rounded shadow text-white transition-colors ${livePnl.pnl >= 0 ? 'bg-green-600' : 'bg-red-600'}`}>
-                                    <div className="flex justify-between items-center">
-                                        <span className="font-bold text-lg">Active P&L</span>
-                                        <span className="text-xl font-mono">{livePnl.pnl.toFixed(2)} ({livePnl.pnlPercent.toFixed(2)}%)</span>
+                                {/* --- NEW: List of Recommended Strategies --- */}
+                                {decisionResult.recommendedStrategies && decisionResult.recommendedStrategies.length > 0 ? (
+                                    <div className="grid grid-cols-1 gap-4">
+                                        {decisionResult.recommendedStrategies.map((strat, index) => (
+                                            <div key={index} className="border dark:border-gray-600 rounded p-3 bg-gray-50 dark:bg-gray-700/30 hover:shadow-md transition-shadow">
+                                                <div className="flex justify-between items-center mb-2">
+                                                    <h3 className="font-bold text-md text-gray-800 dark:text-gray-100">{strat.name}</h3>
+                                                    <button
+                                                        onClick={() => handleExecuteSpecificStrategy(strat)}
+                                                        className="bg-green-600 hover:bg-green-700 text-white text-xs px-3 py-1.5 rounded shadow-sm font-medium"
+                                                    >
+                                                        ⚡ Execute
+                                                    </button>
+                                                </div>
+                                                {/* LEGS DISPLAY */}
+                                                <div className="space-y-1">
+                                                    {strat.legs.map((leg, legIdx) => (
+                                                        <div key={legIdx} className="flex justify-between items-center text-xs bg-white dark:bg-gray-800 px-2 py-1 rounded border dark:border-gray-600">
+                                                            <span className={`font-bold w-10 ${leg.action === 'BUY' ? 'text-green-600' : 'text-red-500'}`}>
+                                                                {leg.action}
+                                                            </span>
+                                                            <span className="font-mono text-gray-700 dark:text-gray-300 flex-1 text-center">
+                                                                {leg.strike} {leg.type || leg.optionType}
+                                                            </span>
+                                                            <span className="text-gray-400 w-16 text-right">
+                                                                ₹{leg.price || leg.greeks?.ltp || '?'}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
-                                    <div className="text-xs opacity-80 mt-1 border-t border-white/20 pt-1 flex justify-between">
-                                        <span>Risk Manager Active</span>
-                                        <span>Target: +10% | SL: -20%</span>
+                                ) : (
+                                    <p className="text-red-500 italic text-xs">
+                                        {decisionResult.reason || "No suitable strategies found for current market conditions."}
+                                    </p>
+                                )}
+
+                                {decisionResult.expectedMove && (
+                                    <div className="mt-3 text-xs text-gray-500 flex justify-between border-t dark:border-gray-700 pt-2">
+                                        <span>Spot: {decisionResult.spot}</span>
+                                        <span>Expected Move: ±{decisionResult.expectedMove}</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                            {Object.keys(activeTrades).length > 0 && (
+                                <div className="mt-4 mb-4">
+                                    <h2 className="text-sm font-bold text-gray-800 dark:text-gray-100 mb-2 flex items-center gap-2">
+                                        🔴 Live Positions ({Object.keys(activeTrades).length})
+                                    </h2>
+                                    <div className="bg-white dark:bg-gray-800 rounded shadow overflow-hidden border border-gray-200 dark:border-gray-700">
+                                        <table className="min-w-full text-xs text-left">
+                                            <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold uppercase">
+                                                <tr>
+                                                    <th className="px-3 py-2">Symbol</th>
+                                                    <th className="px-3 py-2">Strategy</th>
+                                                    <th className="px-3 py-2">LTP</th>
+                                                    <th className="px-3 py-2 text-right">P&L</th>
+                                                    <th className="px-3 py-2 text-right">%</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-200 dark:divide-gray-600">
+                                                {Object.values(activeTrades).map((trade) => (
+                                                    <tr key={trade.tradeId} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
+                                                        <td className="px-3 py-2 font-bold text-gray-800 dark:text-gray-100">
+                                                            {trade.symbol}
+                                                        </td>
+                                                        <td className="px-3 py-2 text-gray-600 dark:text-gray-400">
+                                                            {trade.strategy || 'Custom'}
+                                                        </td>
+                                                        <td className="px-3 py-2 font-mono text-gray-700 dark:text-gray-300">
+                                                            {trade.ltp?.toFixed(2)}
+                                                        </td>
+                                                        <td className={`px-3 py-2 font-bold text-right ${trade.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                            {trade.pnl >= 0 ? '+' : ''}{trade.pnl?.toFixed(2)}
+                                                        </td>
+                                                        <td className={`px-3 py-2 font-mono text-right ${trade.pnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                            {trade.pnlPercent?.toFixed(2)}%
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                            <tfoot className="bg-gray-50 dark:bg-gray-900 font-bold text-gray-800 dark:text-white border-t dark:border-gray-600">
+                                                <tr>
+                                                    <td colSpan="3" className="px-3 py-2 text-right uppercase text-xs tracking-wider">Total P&L</td>
+                                                    <td className={`px-3 py-2 text-right text-base ${
+                                                        Object.values(activeTrades).reduce((sum, t) => sum + (t.pnl || 0), 0) >= 0 
+                                                        ? 'text-green-600' : 'text-red-600'
+                                                    }`}>
+                                                        ₹{Object.values(activeTrades).reduce((sum, t) => sum + (t.pnl || 0), 0).toFixed(2)}
+                                                    </td>
+                                                    <td className="px-3 py-2"></td>
+                                                </tr>
+                                            </tfoot>
+                                        </table>
                                     </div>
                                 </div>
                             )}

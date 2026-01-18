@@ -269,7 +269,29 @@ function getSensibullConfig(symbol) {
     else if (s.includes('SENSEX')) {
         return { width: 400, interval: 100 };
     }
-    
+    // 🔴 RELIANCE
+    else if (s.includes('RELIANCE')) {
+        return { width: 20, interval: 10 };
+    }
+
+    else if (s.includes('HDFCBANK') || s.includes('HDFC BANK')) {
+        return { width: 10, interval: 5 };
+    }
+    else if (s.includes('ICICIBANK')) {
+        return { width: 20, interval: 10 };
+    }
+     else if (s.includes('SBIN')) {
+        return { width: 10, interval: 10 };
+    }
+    else if (s.includes('INFY')) {
+        return { width: 40, interval: 100 };
+    }
+     else if (s.includes('TCS')) {
+        return { width: 20, interval: 10 };
+    }
+    else if (s.includes('BHARATIARTL')) {
+        return { width: 20, interval: 10 };
+    }
     // DEFAULT (NIFTY 50 & OTHERS)
     return { width: 200, interval: 50 };
 }
@@ -646,116 +668,110 @@ function chooseStrikeWithPreferences(chain, roundedTarget, side='PE', atmIndex=n
 
 // 5. THE CORE LOGIC (Team Lead's Implementation)
 function improvedStrikeSelection(chain, spot, dte) {
-    const interval = detectIntervalFromChain(chain);
-    
-    // Find ATM
-    let atmNode = chain[0];
-    let minDiff = Infinity;
-    chain.forEach(c => {
-        const d = Math.abs(c.strike - spot);
-        if(d < minDiff) { minDiff = d; atmNode = c; }
-    });
-    const atmIndex = chain.findIndex(x => x.strike === atmNode.strike);
+    const interval = detectIntervalFromChain(chain);
+    
+    // Find ATM
+    let atmNode = chain[0];
+    let minDiff = Infinity;
+    chain.forEach(c => {
+        const d = Math.abs(c.strike - spot);
+        if(d < minDiff) { minDiff = d; atmNode = c; }
+    });
+    const atmIndex = chain.findIndex(x => x.strike === atmNode.strike);
 
-    const atmIV = (atmNode && (atmNode.CE?.iv || atmNode.PE?.iv)) ? (atmNode.CE?.iv || atmNode.PE?.iv) : 15;
-    
-    const t = (dte < 1 ? 1 : dte) / 365;
-    const em = spot * (atmIV / 100) * Math.sqrt(t);
+    const atmIV = (atmNode && (atmNode.CE?.iv || atmNode.PE?.iv)) ? (atmNode.CE?.iv || atmNode.PE?.iv) : 15;
+    
+    const t = (dte < 1 ? 1 : dte) / 365;
+    const em = spot * (atmIV / 100) * Math.sqrt(t);
 
-    const lowerRaw = spot - em;
-    const upperRaw = spot + em;
-    const lowerRounded = roundToNearestStrike(lowerRaw, interval);
-    const upperRounded = roundToNearestStrike(upperRaw, interval);
+    const lowerRaw = spot - em;
+    const upperRaw = spot + em;
+    const lowerRounded = roundToNearestStrike(lowerRaw, interval);
+    const upperRounded = roundToNearestStrike(upperRaw, interval);
 
-    console.log(`🎯 TARGETS: Lower ${lowerRounded} | Upper ${upperRounded} (Interval: ${interval})`);
+    console.log(`🎯 TARGETS: Lower ${lowerRounded} | Upper ${upperRounded} (Interval: ${interval})`);
 
-    let sellPut = chooseStrikeWithPreferences(chain, lowerRounded, 'PE', atmIndex);
-    let sellCall = chooseStrikeWithPreferences(chain, upperRounded, 'CE', atmIndex);
+    let sellPut = chooseStrikeWithPreferences(chain, lowerRounded, 'PE', atmIndex);
+    let sellCall = chooseStrikeWithPreferences(chain, upperRounded, 'CE', atmIndex);
 
-    if (!sellPut) sellPut = chooseByDelta(chain, 'PE', 0.16, atmIndex) || chain[Math.max(0, atmIndex - 2)];
-    if (!sellCall) sellCall = chooseByDelta(chain, 'CE', 0.16, atmIndex) || chain[Math.min(chain.length - 1, atmIndex + 2)];
+    if (!sellPut) sellPut = chooseByDelta(chain, 'PE', 0.16, atmIndex) || chain[Math.max(0, atmIndex - 2)];
+    if (!sellCall) sellCall = chooseByDelta(chain, 'CE', 0.16, atmIndex) || chain[Math.min(chain.length - 1, atmIndex + 2)];
 
-    if (sellPut.strike >= sellCall.strike) {
-        const fallbackLower = chain[Math.max(0, atmIndex - 4)] || chain[0];
-        const fallbackUpper = chain[Math.min(chain.length - 1, atmIndex + 4)] || chain[chain.length-1];
-        if (fallbackLower.strike < fallbackUpper.strike) {
-            sellPut = fallbackLower;
-            sellCall = fallbackUpper;
-        }
-    }
+    if (sellPut.strike >= sellCall.strike) {
+        const fallbackLower = chain[Math.max(0, atmIndex - 4)] || chain[0];
+        const fallbackUpper = chain[Math.min(chain.length - 1, atmIndex + 4)] || chain[chain.length-1];
+        if (fallbackLower.strike < fallbackUpper.strike) {
+            sellPut = fallbackLower;
+            sellCall = fallbackUpper;
+        }
+    }
 
-    const sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
-    const sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
-    const buyPut = chain[Math.max(0, sellPutIndex - 2)] || chain[sellPutIndex];
-    const buyCall = chain[Math.min(chain.length - 1, sellCallIndex + 2)] || chain[sellCallIndex];
+    const sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
+    const sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
+    const buyPut = chain[Math.max(0, sellPutIndex - 2)] || chain[sellPutIndex];
+    const buyCall = chain[Math.min(chain.length - 1, sellCallIndex + 2)] || chain[sellCallIndex];
 
-    return { atmNode, atmIndex, interval, sellPut, buyPut, sellCall, buyCall, expectedMove: Math.round(em) };
+    return { atmNode, atmIndex, interval, sellPut, buyPut, sellCall, buyCall, expectedMove: Math.round(em) };
 }
 
 // 6. MAIN SELECTOR WRAPPER
+// ==================================================================
+// 6. MAIN SELECTOR WRAPPER (UPDATED: RETURNS MULTIPLE OPTIONS)
+// ==================================================================
 function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
     // 1. Validation
     if (!spot || !chain || chain.length < 5) {
         return { error: "Insufficient market data to build strategies." };
     }
     
-    // 2. Get Symbol Specific Config (Widths & Intervals)
+    // 2. Get Symbol Specific Config
     const symbol = chain[0].CE?.symbol || chain[0].PE?.symbol || "NIFTY";
     const config = getSensibullConfig(symbol);
 
-    // 3. Exact ATM Rounding Logic (Sensibull Style)
-    // Example: Nifty at 25620 rounds to 25600 (nearest 50)
+    // 3. Round ATM
     const atmStrike = Math.round(spot / config.interval) * config.interval;
     
-    // 4. Build COMPLETE Strategy List (All 20+)
+    // 4. Build ALL Strategies
     const strategies = [];
     
-    // --- A. BULLISH STRATEGIES ---
+    // --- A. BULLISH ---
     strategies.push(buildBullCallSpread(chain, atmStrike, config));
     strategies.push(buildBullPutSpread(chain, atmStrike, config));
     strategies.push(buildCallRatioBackSpread(chain, atmStrike, config));
     strategies.push(buildLongCall(chain, atmStrike));
-    strategies.push(buildSyntheticLong(chain, atmStrike));
     
-    // --- B. BEARISH STRATEGIES ---
+    // --- B. BEARISH ---
     strategies.push(buildBearPutSpread(chain, atmStrike, config));
     strategies.push(buildBearCallSpread(chain, atmStrike, config));
     strategies.push(buildPutRatioBackSpread(chain, atmStrike, config));
     strategies.push(buildLongPut(chain, atmStrike));
-    strategies.push(buildSyntheticShort(chain, atmStrike));
     
-    // --- C. NEUTRAL STRATEGIES ---
+    // --- C. NEUTRAL ---
     strategies.push(buildIronCondor(chain, atmStrike, config));
     strategies.push(buildIronButterfly(chain, atmStrike, config));
     strategies.push(buildShortStraddle(chain, atmStrike));
     strategies.push(buildShortStrangle(chain, atmStrike, config));
-    strategies.push(buildJadeLizard(chain, atmStrike, config));
-    strategies.push(buildCallButterfly(chain, atmStrike, config));
 
-    // --- D. OTHER / VOLATILITY / HEDGING ---
-    strategies.push(buildLongStraddle(chain, atmStrike));
-    strategies.push(buildLongStrangle(chain, atmStrike, config));
-    strategies.push(buildProtectivePut(chain, spot, atmStrike));
-    strategies.push(buildCoveredCall(chain, spot, atmStrike, config));
+    // 5. INTELLIGENT FILTERING
+    // Instead of picking 1, we filter by the view (Signal)
+    let recommendedStrategies = [];
 
-    // 5. Intelligent Recommendation Engine (Based on DTE)
-    // If Near Expiry (< 3 Days): Prefer Credit Strategies (Theta Gain)
-    // If Far Expiry (> 3 Days): Prefer Debit Strategies (Directional Play)
-    
-    const isNearExpiry = dte <= 3;
-    let chosenStrategyName = "";
-    
     if (signal === "BULL") {
-        chosenStrategyName = isNearExpiry ? "Bull Put Spread" : "Bull Call Spread";
+        // Return all Bullish strategies
+        recommendedStrategies = strategies.filter(s => 
+            s.name.includes("Bull") || s.name === "Long Call" || s.name.includes("Call Ratio")
+        );
     } else if (signal === "BEAR") {
-        chosenStrategyName = isNearExpiry ? "Bear Call Spread" : "Bear Put Spread";
+        // Return all Bearish strategies
+        recommendedStrategies = strategies.filter(s => 
+            s.name.includes("Bear") || s.name === "Long Put" || s.name.includes("Put Ratio")
+        );
     } else { 
         // NEUTRAL
-        chosenStrategyName = isNearExpiry ? "Iron Butterfly" : "Iron Condor"; 
+        recommendedStrategies = strategies.filter(s => 
+            s.name.includes("Iron") || s.name.includes("Straddle") || s.name.includes("Strangle")
+        );
     }
-
-    // Find the object for the chosen strategy
-    const chosenStrategy = strategies.find(s => s.name === chosenStrategyName) || strategies[0];
 
     // 6. Return Data Bundle
     return {
@@ -764,12 +780,12 @@ function sensibullSelector(chain, spot, dte, signal="NEUTRAL") {
         daysToExpiry: dte,
         configUsed: config,       
         marketCondition: signal,
-        recommendationReason: isNearExpiry ? "Near Expiry (Theta Play)" : "Far Expiry (Directional Play)",
-        chosenStrategy,           
-        strategies                // Array of ALL generated strategies
+        // Send back ALL recommended options, not just one "chosenStrategy"
+        recommendedStrategies: recommendedStrategies, 
+        allStrategies: strategies 
     };
 }
-// ==================================================================
+
 // 7. AUTH ROUTES
 // ==================================================================
 app.post('/api/fyers/login', async (req, res) => {
@@ -865,7 +881,7 @@ function processTick(ltp, time) {
 }
 
 async function runSignalLogic() {
-    if (algoState.isInTrade || candleHistory.length < 25) return;
+    if (livePositions.length >= 5|| candleHistory.length < 25) return;
     const closes = candleHistory.map(c => c.close);
     const sma7 = closes.slice(-7).reduce((a, b) => a + b, 0) / 7;
     const sma25 = closes.slice(-25).reduce((a, b) => a + b, 0) / 25;
@@ -875,46 +891,84 @@ async function runSignalLogic() {
     broadcast({ type: 'STATUS', message: `SMA7: ${sma7.toFixed(2)} | SMA25: ${sma25.toFixed(2)}` });
 }
 
+// ==================================================================
+// UPDATED ALGO MANAGER (MULTI-TRADE SUPPORT)
+// ==================================================================
 function startAlgoManager() {
     setInterval(async () => {
         if (!fyersAccessToken || livePositions.length === 0) return;
-        try {
-            const pos = livePositions[0]; 
-            const quoteSymbol = pos.instrument || pos.symbol; 
-            
-            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { params: { symbols: quoteSymbol }, headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } });
-            const ltp = quotesRes.data.d?.[0]?.v?.lp;
-            if (!ltp) return; 
-            
-            const pnl = (ltp - pos.buyPrice) * pos.qty;
-            const pnlPercent = ((ltp - pos.buyPrice) / pos.buyPrice) * 100;
-            
-            broadcast({ type: 'PNL_UPDATE', pnl: pnl, ltp: ltp, trade: pos, pnlPercent: pnlPercent });
-            
-            let exitReason = null;
-            if (ltp >= (pos.buyPrice * 1.10)) {
-                exitReason = "TARGET (10%)";
-            } else if (ltp <= (pos.buyPrice * 0.80)) {
-                exitReason = "STOP LOSS (20%)";
-            }
 
-            if (exitReason) {
-                console.log(`[SIMULATION] Trade Closed: ${exitReason}`);
+        // LOOP through ALL positions (backwards to safely remove items)
+        for (let i = livePositions.length - 1; i >= 0; i--) {
+            try {
+                const pos = livePositions[i];
+                const quoteSymbol = pos.instrument || pos.symbol;
+
+                // 1. Fetch Live Price
+                const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
+                    params: { symbols: quoteSymbol }, 
+                    headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
+                });
+
+                const ltp = quotesRes.data.d?.[0]?.v?.lp;
+                if (!ltp) continue;
+
+                // 2. Calculate P&L for THIS specific trade
+                const pnl = (ltp - pos.buyPrice) * pos.qty; // Note: Logic differs for SELL vs BUY orders
+                // Adjust PNL logic based on BUY/SELL
+                const multiplier = (pos.action === 'BUY') ? 1 : -1;
+                const realPnl = (ltp - pos.buyPrice) * pos.qty * multiplier;
+
+                const pnlPercent = ((ltp - pos.buyPrice) / pos.buyPrice) * 100 * multiplier;
                 
-                const tradeRecord = {
-                    ...pos,
-                    endTime: new Date().toLocaleTimeString(),
-                    exitPrice: ltp,
-                    pnl: pnl,
-                    reason: exitReason
-                };
-                logTradeToCSV(tradeRecord);
-                
-                livePositions = []; algoState.isInTrade = false; 
-                broadcast({ type: 'TRADE_CLOSE', message: `Trade Closed: ${exitReason}` });
+                // 3. Broadcast Update
+                broadcast({ 
+                    type: 'PNL_UPDATE', 
+                    tradeId: pos.orderId, // Unique ID is crucial now
+                    symbol: pos.instrument || pos.symbol, // <--- ADDED
+                    strategy: pos.strategy,
+                    pnl: realPnl, 
+                    pnlPercent: pnlPercent,
+                    ltp: ltp 
+                });
+
+                // 4. Check Exit Conditions
+                let exitReason = null;
+                // Example: Target 10% / Stoploss 20%
+                if (realPnl >= (pos.buyPrice * pos.qty * 0.10)) {
+                    exitReason = "TARGET (10%)";
+                } else if (realPnl <= -(pos.buyPrice * pos.qty * 0.20)) {
+                    exitReason = "STOP LOSS (20%)";
+                }
+
+                // 5. Close Trade
+                if (exitReason) {
+                    console.log(`[${pos.instrument}] Trade Closed: ${exitReason}`);
+                    
+                    const tradeRecord = {
+                        ...pos,
+                        endTime: new Date().toLocaleTimeString(),
+                        exitPrice: ltp,
+                        pnl: realPnl,
+                        reason: exitReason
+                    };
+                    logTradeToCSV(tradeRecord);
+
+                    // REMOVE ONLY THIS TRADE from the array
+                    livePositions.splice(i, 1); 
+                    
+                    broadcast({ type: 'TRADE_CLOSE', message: `Trade ${pos.instrument} Closed: ${exitReason}` });
+                }
+
+            } catch (e) {
+                console.error(`Manager Error (Trade ${i}):`, e.message);
             }
-        } catch (e) { console.error("Manager Error", e.message); }
-    }, 2000); 
+        }
+        
+        // Update global state
+        algoState.isInTrade = livePositions.length > 0;
+
+    }, 2000);
 }
 
 async function placeLiveOrder(symbol, qty, side, isAMO = false) {
