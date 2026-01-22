@@ -981,9 +981,9 @@ async function placeLiveOrder(symbol, qty, side, isAMO = false) {
     return await fyers.place_order(payload);
 }
 // ==================================================================
-// 4. FETCH OPTION CHAIN (DEEP SCAN & DIAGNOSTICS)
+// 4. FETCH OPTION CHAIN (UPDATED: SUPPORTS WEEKLY & MONTHLY)
 // ==================================================================
-async function fetchMarketDataWithGreeks(symbol) {
+async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
     let inputSymbol = symbol.toUpperCase();
     let underlyingSymbolFyers = '';
     let userFriendlyKey = '';
@@ -991,7 +991,7 @@ async function fetchMarketDataWithGreeks(symbol) {
     // 1. DYNAMIC SYMBOL MAPPING
     const indexMap = {
         'NIFTY': 'NSE:NIFTY50-INDEX',
-        'BANKNIFTY': 'NSE:NIFTYBANK-INDEX',
+        'BANKNIFTY': 'NSE:NIFTYBANK-INDEX', // Monthly Only (Tue)
         'FINNIFTY': 'NSE:FINNIFTY-INDEX',
         'MIDCPNIFTY': 'NSE:MIDCPNIFTY-INDEX',
         'SENSEX': 'BSE:SENSEX-INDEX',
@@ -1037,72 +1037,68 @@ async function fetchMarketDataWithGreeks(symbol) {
 
     let chainRes;
     let daysToExpiry = 0;
-    let nearestExpiry = null; 
+    let selectedExpiry = null;
+    let allValidExpiries = []; // New: To store all options
     let optionsList = [];
 
     try {
-        // [FIX 1] Increase strikecount to 20 to find "hidden" weeklies
+        // Step A: Get List of Expiries (Metadata only)
         const metaRes = await fyers.getOptionChain({ 
             symbol: underlyingSymbolFyers, 
-            strikecount: 20, 
+            strikecount: 1, // Minimize load, we just want dates first
             timestamp: "" 
         });
 
         if (metaRes.data && metaRes.data.expiryData) {
             const rawExpiries = metaRes.data.expiryData;
 
-            // Permissive Filter (Includes Yesterday)
+            // Filter out past expiries
             const cutoffTime = new Date();
             cutoffTime.setHours(0, 0, 0, 0);
             cutoffTime.setDate(cutoffTime.getDate() - 1); 
 
-            const validExpiries = rawExpiries.filter(e => {
+            allValidExpiries = rawExpiries.filter(e => {
                 const unixTime = Number(e.expiry); 
                 if (isNaN(unixTime)) return false; 
                 const expiryDate = new Date(unixTime * 1000);
                 return expiryDate.getTime() >= cutoffTime.getTime();
             });
 
-            validExpiries.sort((a, b) => Number(a.expiry) - Number(b.expiry));
+            allValidExpiries.sort((a, b) => Number(a.expiry) - Number(b.expiry));
 
-            if (validExpiries.length > 0) {
-                nearestExpiry = validExpiries[0];
-                console.log(`✅ [${userFriendlyKey}] Selected Expiry: ${nearestExpiry.date} (Ts: ${nearestExpiry.expiry})`);
-                
-                // [FIX 2] DIAGNOSTIC CHECK
-                const isIndex = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'].includes(userFriendlyKey);
-                const tempDte = (new Date(Number(nearestExpiry.expiry)*1000) - new Date()) / (1000*3600*24);
-                
-                if (isIndex && tempDte > 7) {
-                    console.warn(`⚠️ [${userFriendlyKey}] Warning: Weekly missing? Closest found is ${tempDte.toFixed(1)} days away.`);
-                    
-                    // 🔍 PRINT WHAT THE API ACTUALLY SENT
-                    console.log(`🔍 RAW API RESPONSE for ${userFriendlyKey}:`);
-                    rawExpiries.slice(0, 5).forEach(e => {
-                         const d = new Date(Number(e.expiry)*1000);
-                         console.log(`   - Date: ${e.date} | TS: ${e.expiry} | Valid? ${d.getTime() >= cutoffTime.getTime()}`);
-                    });
+            if (allValidExpiries.length > 0) {
+                // Step B: SELECT THE EXPIRY
+                // If the user requested a specific timestamp, try to find it.
+                if (targetExpiryTs) {
+                    selectedExpiry = allValidExpiries.find(e => e.expiry == targetExpiryTs);
+                    if (selectedExpiry) {
+                        console.log(`✅ [${userFriendlyKey}] User Requested Expiry: ${selectedExpiry.date}`);
+                    } else {
+                        console.warn(`⚠️ Requested expiry ${targetExpiryTs} not found. Reverting to nearest.`);
+                        selectedExpiry = allValidExpiries[0];
+                    }
+                } else {
+                    // Default to nearest (Weekly)
+                    selectedExpiry = allValidExpiries[0];
+                    console.log(`✅ [${userFriendlyKey}] Default Expiry: ${selectedExpiry.date}`);
                 }
             } else {
-                console.warn(`⚠️ [${userFriendlyKey}] Filter removed all dates. Fallback to raw[0].`);
-                nearestExpiry = rawExpiries[0];
+                 console.warn(`⚠️ [${userFriendlyKey}] No valid expiries found.`);
             }
 
-            if (nearestExpiry && nearestExpiry.expiry) {
-                const unixTime = Number(nearestExpiry.expiry);
-                if (!isNaN(unixTime)) {
-                    const expiryDateObj = new Date(unixTime * 1000);
-                    const now = new Date();
-                    const diffTime = expiryDateObj.getTime() - now.getTime();
-                    daysToExpiry = Math.max(0, diffTime / (1000 * 60 * 60 * 24));
-                    console.log(`📅 DTE: ${daysToExpiry.toFixed(4)} days`);
+            // Step C: Fetch Full Chain for Selected Expiry
+            if (selectedExpiry && selectedExpiry.expiry) {
+                const unixTime = Number(selectedExpiry.expiry);
+                const expiryDateObj = new Date(unixTime * 1000);
+                const now = new Date();
+                const diffTime = expiryDateObj.getTime() - now.getTime();
+                daysToExpiry = Math.max(0, diffTime / (1000 * 60 * 60 * 24));
 
-                    chainRes = await fyers.getOptionChain({ 
-                        symbol: underlyingSymbolFyers, 
-                        strikecount: 100, 
-                        timestamp: unixTime 
-                    });
-                }
+                chainRes = await fyers.getOptionChain({ 
+                    symbol: underlyingSymbolFyers, 
+                    strikecount: 100, // Now fetch deep chain
+                    timestamp: unixTime 
+                });
             }
         }
     } catch (error) { console.error(`❌ Chain Fetch Error (${userFriendlyKey}):`, error.message); }
@@ -1127,7 +1123,9 @@ async function fetchMarketDataWithGreeks(symbol) {
         spot: spotPrice,
         vix: effectiveVix,
         daysToExpiry: daysToExpiry, 
-        expiryDate: (nearestExpiry) ? nearestExpiry.date : "N/A", 
+        expiryDate: selectedExpiry ? selectedExpiry.date : "N/A", 
+        expiryTs: selectedExpiry ? selectedExpiry.expiry : null, // Send active TS
+        allExpiries: allValidExpiries, // ✅ SEND LIST TO FRONTEND
         options: optionsList,
         lotSize: lotSize,
     };
@@ -1146,10 +1144,17 @@ app.get('/api/live-data/:symbol', async (req, res) => {
 app.get('/api/live-data-with-greeks/:symbol', async (req, res) => {
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
     try {
-        const data = await fetchMarketDataWithGreeks(req.params.symbol);
+        const symbol = req.params.symbol;
+        const requestedExpiry = req.query.expiry; // <--- Capture Query Param
+        
+        // Pass the requested expiry to the function
+        const data = await fetchMarketDataWithGreeks(symbol, requestedExpiry);
+        
         liveDataCache[data.symbol] = { timestamp: Date.now(), data: data }; 
         res.json(data);
-    } catch (error) { res.status(500).json({ error: "Failed to fetch data", details: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: "Failed to fetch data", details: error.message }); 
+    }
 });
 
 app.post('/api/decide-and-build-order', async (req, res) => {

@@ -286,6 +286,7 @@ function App() {
     // --- PHASE 4 STATES ---
     const [isLiveMode, setIsLiveMode] = useState(false);
     const [liveData, setLiveData] = useState(null);
+    const [selectedExpiry, setSelectedExpiry] = useState('');
     const [liveDataLoading, setLiveDataLoading] = useState(false);
     const [liveDataError, setLiveDataError] = useState(null);
     const [decisionResult, setDecisionResult] = useState(null); 
@@ -298,6 +299,14 @@ function App() {
         document.documentElement.classList.toggle('dark', theme === 'dark');
     }, [theme]);
     const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
+
+    // ✅ NEW: Auto-refresh when user picks a different expiry
+    useEffect(() => {
+        if (isLiveMode) {
+            fetchLiveData();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedExpiry]);
 
     useEffect(() => {
         if (isLiveMode && liveData) {
@@ -413,10 +422,17 @@ function App() {
         return newForm;
     }, []);
 
+    // ✅ UPDATED: Now sends the 'selectedExpiry' to the backend
     const fetchLiveData = async () => {
         setLiveDataLoading(true); setLiveDataError(null);
         try {
-            const res = await axios.get(`${BACKEND_URL}/api/live-data-with-greeks/${symbol}`);
+            // Construct URL with optional expiry parameter
+            let url = `${BACKEND_URL}/api/live-data-with-greeks/${symbol}`;
+            if (selectedExpiry) {
+                url += `?expiry=${selectedExpiry}`;
+            }
+
+            const res = await axios.get(url);
             const liveApiData = res.data;
             setLiveData(liveApiData);
 
@@ -499,6 +515,7 @@ function App() {
     const handleSymbolChange = (e) => {
         const newSymbol = e.target.value;
         setSymbol(newSymbol);
+        setSelectedExpiry(''); // 🆕 RESET EXPIRY TO DEFAULT
         
         const configKey = getSymbolKey(newSymbol);
         // FIX: If lot size isn't known, default to 1, don't set it to 0 or null
@@ -634,6 +651,34 @@ function App() {
                             <div>
                                 <h2 className="text-xl font-bold text-indigo-800 dark:text-indigo-300">Auto-Execute Engine</h2>
                                 <p className="text-sm text-indigo-600 dark:text-indigo-400">Days To Expiry: {liveData?.daysToExpiry !== undefined ? liveData.daysToExpiry : 'N/A'}</p>
+                            </div>
+                        </div>
+
+                        {/* 🆕 EXPIRY SELECTOR UI */}
+                        <div className="mb-4 bg-white dark:bg-gray-800 p-3 rounded border dark:border-gray-700 flex justify-between items-center shadow-sm">
+                            <div>
+                                <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Current Expiry</span>
+                                <div className="font-mono text-lg font-bold text-indigo-600 dark:text-indigo-400">
+                                    {liveData ? liveData.expiryDate : "Loading..."}
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-bold text-gray-600 dark:text-gray-400">Change Expiry:</label>
+                                <select 
+                                    className="p-2 rounded border dark:bg-gray-700 dark:text-white dark:border-gray-600 text-sm"
+                                    value={selectedExpiry}
+                                    onChange={(e) => setSelectedExpiry(e.target.value)}
+                                    disabled={!isLiveMode || !liveData}
+                                >
+                                    <option value="">Default (Nearest)</option>
+                                    {/* Populate list from Backend Data */}
+                                    {liveData && liveData.allExpiries && liveData.allExpiries.map((exp) => (
+                                        <option key={exp.expiry} value={exp.expiry}>
+                                            {exp.date} {/* Shows "28-Jan-2026" */}
+                                        </option>
+                                    ))}
+                                </select>
                             </div>
                         </div>
 
