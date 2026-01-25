@@ -602,6 +602,16 @@ function App() {
     const formatValue = (value) => (typeof value === 'number') ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value;
 
     const renderGreeksTable = () => {
+        // 1. ADD THIS BLOCK: Handle loading state
+        if (liveDataLoading) {
+            return (
+                <div className="mt-4 p-8 bg-white dark:bg-gray-800 rounded shadow text-center">
+                    <span className="text-indigo-600 font-bold animate-pulse">
+                        ⟳ Fetching Live Option Chain & Greeks...
+                    </span>
+                </div>
+            );
+        }
         if (!liveData || !liveData.options) return null;
         const atmIndex = liveData.options.reduce((closestIdx, opt, idx, arr) => Math.abs(opt.strike - liveData.spot) < Math.abs(arr[closestIdx].strike - liveData.spot) ? idx : closestIdx, 0);
         const subset = liveData.options.slice(Math.max(0, atmIndex - 6), Math.min(liveData.options.length, atmIndex + 7));

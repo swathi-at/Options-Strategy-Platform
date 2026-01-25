@@ -1,0 +1,39 @@
+Project: Algo Strategy Platform
+Topic: R&D on Upstox API Migration
+Date: 25 Jan 2026
+Author: Srinivas
+
+1. Executive Summary
+   Moving from Fyers to Upstox is FEASIBLE but requires significant rewrite of the 'Market Data' module.
+   Upstox offers a robust API v2 with full Option Chain support, but the WebSocket format differs.
+
+2. Feature Comparison
+   ------------------------------------------------------------
+   Feature             | Fyers API v3         | Upstox API v2
+   ------------------------------------------------------------
+   Option Chain        | Single API Call      | Requires separate instrument keys
+   WebSockets          | Binary/Json format   | Protobuf (requires decoding)
+   Greeks Data         | Pre-calculated       | NOT provided (Must calc locally)
+   Order Limits        | Standard             | Similar (Rate limits apply)
+   ------------------------------------------------------------
+
+3. Critical Technical Challenges
+   A. Greeks Calculation:
+      - Fyers gives us Delta/Theta/Gamma directly.
+      - Upstox DOES NOT. We must rely entirely on our local 'black-scholes' library.
+      - Impact: Higher CPU usage on our server to calculate Greeks for 100+ strikes.
+
+   B. WebSocket Decoding:
+      - Upstox uses Google Protocol Buffers (Protobuf).
+      - We need to install 'protobufjs' and load a .proto schema to read tick data.
+      - This adds complexity compared to Fyers' simpler JSON stream.
+
+4. Migration Steps (Estimated Effort: 3-4 Days)
+   Day 1: Auth Module rewrite (OAuth2 flow is standard).
+   Day 2: WebSocket integration using Protobuf.
+   Day 3: Rewrite 'fetchMarketData' to calculate Greeks locally for all strikes.
+   Day 4: Integration testing.
+
+5. Recommendation
+   Stay with Fyers for Phase 1 because they provide pre-calculated Greeks.
+   Migrate to Upstox in Phase 2 only if Fyers stability becomes an issue.
