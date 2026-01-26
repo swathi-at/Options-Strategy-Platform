@@ -1358,7 +1358,13 @@ app.post('/api/execute-trade', async (req, res) => {
                 // --- B. Calculate Quantity ---
                 // leg.qty is usually 'Lots' from the strategy engine.
                 // We multiply by Lot Size (e.g. 1 lot * 75 = 75 qty)
-                const quantity = (leg.qty || 1) * (algoState.lotSize || 1); 
+                // Resolve the correct lot size dynamically for THIS symbol
+                const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
+                const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
+                const quantity = (leg.qty || 1) * (correctLotSize || 1);
+
+                // 🔍 DEBUG LOG (Add this line)
+                console.log(`🕵️ VERIFY: Symbol=${cleanSymbol} | Lots=${leg.qty} | LotSize=${correctLotSize} | FINAL QTY=${quantity}`);
                 const entryPrice = leg.price || leg.greeks?.ltp || 0;
 
                 console.log(`👉 [${leg.action}] ${quantity}x ${actualSymbol} @ ₹${entryPrice}`);
