@@ -76,29 +76,30 @@ function getEncodedString(string) {
 }
 
 function logTradeToCSV(tradeData) {
-    const headers = "Date,StartTime,EndTime,Instrument,Signal,Strategy,SpotPrice,Strike,EntryPrice,ExitPrice,PnL,Reason\n";
+    const headers = "Date,StartTime,EndTime,Strategy,Instrument,Strike,Type,Action,EntryPrice,ExitPrice,PnL,Reason\n";
     
-    // Create file if it doesn't exist
+    // Create file with headers if it doesn't exist [cite: 77]
     if (!fs.existsSync(LOG_FILE_PATH)) {
         fs.writeFileSync(LOG_FILE_PATH, headers);
     }
 
-    // ✅ FIX: Use safety checks (|| 'N/A') to prevent 'undefined'
-    const row = `${new Date().toLocaleDateString()},` +
-                `${tradeData.startTime || new Date().toLocaleTimeString()},` + // Fallback to current time if missing
-                `${tradeData.endTime || new Date().toLocaleTimeString()},` +
-                `${tradeData.instrument},` +
-                `${tradeData.signal || 'N/A'},` +      // Signal (Bull/Bear)
-                `${tradeData.strategy},` +
-                `${tradeData.spot || 0},` +            // Spot Price
-                `${tradeData.strike},` +
-                `${Number(tradeData.buyPrice).toFixed(2)},` +
-                `${Number(tradeData.exitPrice).toFixed(2)},` +
-                `${Number(tradeData.pnl).toFixed(2)},` +
-                `${tradeData.reason || 'Auto-Exit'}\n`;
+    // Assemble the closure row with End Time and Exit Reason [cite: 84, 90]
+    const row = 
+        `${new Date().toLocaleDateString()},` + // Date
+        `${new Date(tradeData.timestamp).toLocaleTimeString()},` + // Start Time
+        `${tradeData.endTime || new Date().toLocaleTimeString()},` + // End Time [cite: 90]
+        `${tradeData.strategy},` + // Strategy Name [cite: 85]
+        `${tradeData.instrument},` + // Symbol [cite: 86]
+        `${tradeData.strike},` + // Strike [cite: 86]
+        `${tradeData.type},` + // CE/PE
+        `${tradeData.action},` + // BUY/SELL
+        `${Number(tradeData.buyPrice).toFixed(2)},` + // Entry Price [cite: 87]
+        `${Number(tradeData.exitPrice).toFixed(2)},` + // Exit Price
+        `${Number(tradeData.pnl).toFixed(2)},` + // Final P&L [cite: 88]
+        `${tradeData.reason || 'Auto-Exit'}\n`; // Reason (Target/SL/Auto-Square-off) [cite: 70, 71, 112]
 
     fs.appendFileSync(LOG_FILE_PATH, row);
-    console.log("📝 Trade Logged to CSV:", row.trim());
+    console.log("📝 Final Trade Logged to CSV:", row.trim());
 }
 
 // ==================================================================
@@ -853,7 +854,7 @@ function scheduleReports() {
         { hour: 9, minute: 30 },
         { hour: 11, minute: 30 },
         { hour: 13, minute: 30 },
-        { hour: 14, minute: 30 }
+        { hour: 14, minute: 10 }
     ];
 
     reportTimes.forEach(t => {
@@ -868,41 +869,66 @@ function scheduleReports() {
     console.log("✅ Scheduled CSV Reports for 09:30, 11:30, 13:30, 14:30");
 }
 
-function generateCSVReport(filenameLabel) {
-    if (livePositions.length === 0) return;
+// ==================================================================
+// 📊 UPDATED CSV REPORT GENERATOR (MULTI-LEG & BATCHED)
+// ==================================================================
+async function generateCSVReport(filenameLabel) {
+    if (livePositions.length === 0) {
+        console.log(`[${filenameLabel}] No active positions to report.`);
+        return;
+    }
 
     const reportPath = path.join(__dirname, `${filenameLabel}_${new Date().toISOString().split('T')[0]}.csv`);
-    const headers = "Time,Strategy,Symbol,Strike,Type,EntryPrice,LTP,PnL,Greeks_Delta\n";
-
-    let csvContent = headers;
     
-    // We need to fetch fresh LTPs for the report (using existing cache if available)
-    livePositions.forEach(pos => {
-        // Simple PnL calculation based on last known LTP in cache
-        // Note: For a strictly accurate report, you might want to fetchQuotes here.
-        // For now, we use the data available in the 'liveDataCache' or just logged state.
-        
-        let currentPrice = 0; // Ideally fetch this live
-        let delta = "N/A";
-        
-        // Try to find live data in cache
-        let key = pos.instrument.replace('NSE:', '').replace('-EQ', '');
-        if(liveDataCache[key] && liveDataCache[key].data) {
-             const opt = liveDataCache[key].data.options.find(o => o.strike === pos.strike);
-             if(opt) {
-                 const legData = (pos.type === 'CE') ? opt.CE : opt.PE;
-                 currentPrice = legData.ltp;
-                 delta = legData.delta;
-             }
-        }
+    // Header includes all requested fields [cite: 84-89]
+    const headers = "SnapshotTime,StartTime,Strategy,Symbol,Strike,Type,Action,EntryPrice,CurrentLTP,PnL,PnL_Percent,Delta\n";
 
-        const pnl = (currentPrice - pos.buyPrice) * pos.qty * (pos.action === 'BUY' ? 1 : -1);
+    try {
+        // 1. BATCH FETCH: Get all unique symbols to stay within rate limits
+        const uniqueSymbols = [...new Set(livePositions.map(pos => pos.instrument))].join(',');
+        const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
+            params: { symbols: uniqueSymbols }, 
+            headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
+        });
+        const allQuotes = quotesRes.data.d || [];
 
-        csvContent += `${new Date().toLocaleTimeString()},${pos.strategy},${pos.instrument},${pos.strike},${pos.type},${pos.buyPrice},${currentPrice},${pnl.toFixed(2)},${delta}\n`;
-    });
+        let csvContent = headers;
+        const now = new Date().toLocaleTimeString();
 
-    fs.writeFileSync(reportPath, csvContent);
-    console.log(`📄 Generated Report: ${reportPath}`);
+        // 2. PROCESS EVERY LEG
+        livePositions.forEach(pos => {
+            const quote = allQuotes.find(q => q.n === pos.instrument);
+            const currentLtp = quote?.v?.lp || 0;
+
+            // P&L Calculation logic [cite: 72]
+            const multiplier = (pos.action === 'BUY') ? 1 : -1;
+            const pnl = (currentLtp - pos.buyPrice) * pos.qty * multiplier;
+            const pnlPercent = ((currentLtp - pos.buyPrice) / pos.buyPrice) * 100 * multiplier;
+
+            // 3. ASSEMBLE ROW [cite: 84-89]
+            const row = 
+                `${now},` + // Time of report snapshot
+                `${new Date(pos.timestamp).toLocaleTimeString()},` + // Start time of trade
+                `${pos.strategy},` + // Strategy name (e.g., Iron Condor)
+                `${pos.instrument},` + // Full Symbol
+                `${pos.strike},` + // Strike Price
+                `${pos.type},` + // CE or PE
+                `${pos.action},` + // BUY or SELL
+                `${pos.buyPrice.toFixed(2)},` + // Entry Price
+                `${currentLtp.toFixed(2)},` + // Current LTP
+                `${pnl.toFixed(2)},` + // Current P&L
+                `${pnlPercent.toFixed(2)}%,` + // P&L %
+                `N/A\n`; // Placeholder for Greeks (can be expanded)
+
+            csvContent += row;
+        });
+
+        fs.writeFileSync(reportPath, csvContent);
+        console.log(`✅ [${filenameLabel}] Report generated: ${reportPath}`);
+
+    } catch (error) {
+        console.error(`❌ Failed to generate CSV report:`, error.message);
+    }
 }
 
 // 2. Auto Square-Off (Runs at 14:40 / 2:40 PM)
@@ -1014,86 +1040,87 @@ async function runSignalLogic() {
 }
 
 // ==================================================================
-// UPDATED ALGO MANAGER (MULTI-TRADE SUPPORT)
+// 🧠 OPTIMIZED ALGO MANAGER (FIXES 429 RATE LIMIT)
 // ==================================================================
 function startAlgoManager() {
     setInterval(async () => {
+        // 1. Only run if we have active positions and an access token
         if (!fyersAccessToken || livePositions.length === 0) return;
 
-        // LOOP through ALL positions (backwards to safely remove items)
-        for (let i = livePositions.length - 1; i >= 0; i--) {
-            try {
+        try {
+            // 2. BATCHING: Get all unique symbols from active positions
+            // This prevents sending multiple individual requests
+            const uniqueSymbols = [...new Set(livePositions.map(pos => pos.instrument || pos.symbol))].join(',');
+
+            // 3. SINGLE API CALL: Fetch all quotes at once to avoid Status 429
+            const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
+                params: { symbols: uniqueSymbols }, 
+                headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
+            });
+
+            const allQuotes = quotesRes.data.d || [];
+
+            // 4. PROCESS POSITIONS (Iterate backwards to safely remove closed items)
+            for (let i = livePositions.length - 1; i >= 0; i--) {
                 const pos = livePositions[i];
-                const quoteSymbol = pos.instrument || pos.symbol;
+                
+                // Find the specific LTP for this leg from our batched data
+                const quote = allQuotes.find(q => q.n === (pos.instrument || pos.symbol));
+                const ltp = quote?.v?.lp;
 
-                // 1. Fetch Live Price
-                const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
-                    params: { symbols: quoteSymbol }, 
-                    headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
-                });
-
-                const ltp = quotesRes.data.d?.[0]?.v?.lp;
                 if (!ltp) continue;
 
-                // 2. Calculate P&L for THIS specific trade
-                const pnl = (ltp - pos.buyPrice) * pos.qty; // Note: Logic differs for SELL vs BUY orders
-                // Adjust PNL logic based on BUY/SELL
+                // 5. Calculate P&L (Direction Aware)
                 const multiplier = (pos.action === 'BUY') ? 1 : -1;
                 const realPnl = (ltp - pos.buyPrice) * pos.qty * multiplier;
-
                 const pnlPercent = ((ltp - pos.buyPrice) / pos.buyPrice) * 100 * multiplier;
-                
-                // 3. Broadcast Update
+
+                // 6. Broadcast Update to Frontend UI
                 broadcast({ 
                     type: 'PNL_UPDATE', 
-                    tradeId: pos.orderId, // Unique ID is crucial now
-                    symbol: pos.instrument || pos.symbol, // <--- ADDED
+                    tradeId: pos.orderId, 
+                    symbol: pos.instrument || pos.symbol,
                     strategy: pos.strategy,
                     pnl: realPnl, 
                     pnlPercent: pnlPercent,
                     ltp: ltp 
                 });
 
-                // 4. Check Exit Conditions (UPDATED PER FINAL PHASE REQUIREMENTS)
+                // 7. Check Exit Conditions (FINAL PHASE REQUIREMENTS) [cite: 67-71]
                 let exitReason = null;
-                
-                // Target: 25% | Stop Loss: 15%
                 const investment = pos.buyPrice * pos.qty;
                 
+                // Stop Loss = 15%  | Target = 25% 
                 if (realPnl >= (investment * 0.25)) { 
                     exitReason = "TARGET (25%)";
                 } else if (realPnl <= -(investment * 0.15)) { 
                     exitReason = "STOP LOSS (15%)";
                 }
 
-                // 5. Close Trade
+                // 8. Close Trade & Log to CSV
+                // ... inside startAlgoManager loop ...
                 if (exitReason) {
-                    console.log(`[${pos.instrument}] Trade Closed: ${exitReason}`);
-                    
                     const tradeRecord = {
                         ...pos,
-                        endTime: new Date().toLocaleTimeString(),
+                        endTime: new Date().toLocaleTimeString(), // Captures the exact exit time [cite: 90]
                         exitPrice: ltp,
                         pnl: realPnl,
-                        reason: exitReason
+                        reason: exitReason // Logs if it was Target, SL, or Auto-Square Off [cite: 90]
                     };
-                    logTradeToCSV(tradeRecord);
-
-                    // REMOVE ONLY THIS TRADE from the array
+                    logTradeToCSV(tradeRecord); // Writes the final row to trade_logs.csv
                     livePositions.splice(i, 1); 
-                    
                     broadcast({ type: 'TRADE_CLOSE', message: `Trade ${pos.instrument} Closed: ${exitReason}` });
                 }
-
-            } catch (e) {
-                console.error(`Manager Error (Trade ${i}):`, e.message);
             }
+
+        } catch (e) {
+            console.error(`Manager Batch Error:`, e.message);
         }
         
-        // Update global state
+        // Update global trading state
         algoState.isInTrade = livePositions.length > 0;
 
-    }, 2000);
+    }, 5000); // Increased interval to 5s to stay well within Fyers API limits
 }
 
 async function placeLiveOrder(symbol, qty, side, isAMO = false) {
