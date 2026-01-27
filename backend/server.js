@@ -511,10 +511,12 @@ function buildIronButterfly(chain, atmStrike, config) {
 }
 
 function buildCallButterfly(chain, atmStrike, config) {
-    // Buy 1 ITM (-2 Width), Sell 2 ATM, Buy 1 OTM (+2 Width)
+    // Strategy: Long 1 ITM Call, Short 2 ATM Calls, Long 1 OTM Call
+    // This is a "Neutral" strategy with defined risk.
     const atmNode = getStrikeByExactStrike(chain, atmStrike);
-    const lowerNode = getStrikeByExactStrike(chain, atmStrike - (config.width * 2));
-    const upperNode = getStrikeByExactStrike(chain, atmStrike + (config.width * 2));
+    const lowerNode = getStrikeByExactStrike(chain, atmStrike - config.width); // ITM Wing
+    const upperNode = getStrikeByExactStrike(chain, atmStrike + config.width); // OTM Wing
+
     return {
         name: "Call Butterfly",
         legs: [
@@ -748,10 +750,13 @@ function sensibullSelector(chain, spot, dte, signal="NEUTRAL", vix=15) { // Adde
     strategies.push(buildLongPut(chain, atmStrike));
     
     // --- C. NEUTRAL ---
+    strategies.push(buildShortStraddle(chain, atmStrike));
+    strategies.push(buildLongStraddle(chain, atmStrike));  // Added
+    strategies.push(buildShortStrangle(chain, atmStrike, config));
+    strategies.push(buildLongStrangle(chain, atmStrike, config)); // Added
     strategies.push(buildIronCondor(chain, atmStrike, config));
     strategies.push(buildIronButterfly(chain, atmStrike, config));
-    strategies.push(buildShortStraddle(chain, atmStrike));
-    strategies.push(buildShortStrangle(chain, atmStrike, config));
+    strategies.push(buildCallButterfly(chain, atmStrike, config)); // Added
 
     // 5. INTELLIGENT FILTERING
     // Instead of picking 1, we filter by the view (Signal)
@@ -772,27 +777,27 @@ function sensibullSelector(chain, spot, dte, signal="NEUTRAL", vix=15) { // Adde
             s.name.includes("Bear") || s.name === "Long Put" || s.name.includes("Put Ratio")
         );
     } else { 
-        // NEUTRAL CASE - Apply VIX Rules [cite: 226-231]
-        if (vix < 12) {
-            // Low Volatility -> Iron Butterfly
-            recommendedStrategies = strategies.filter(s => s.name.includes("Iron Butterfly"));
-        } else if (vix >= 12 && vix <= 16) {
-            // Normal Volatility -> Iron Condor
-            recommendedStrategies = strategies.filter(s => s.name.includes("Iron Condor"));
-        } else {
-             // Higher Volatility (16-20) -> Keep both, prefer wide
-             recommendedStrategies = strategies.filter(s => s.name.includes("Iron"));
-        }
+        // ============================================================
+        // ⚖️ NEUTRAL / VOLATILITY CASE (Matches Your Image)
+        // ============================================================
+        recommendedStrategies = strategies.filter(s => 
+            s.name === "Short Straddle" || 
+            s.name === "Long Straddle" || 
+            s.name === "Short Strangle" || 
+            s.name === "Long Strangle" || 
+            s.name === "Iron Condor" || 
+            s.name === "Iron Butterfly" || 
+            s.name === "Call Butterfly"
+        );
     }
 
-    // 6. Return Data Bundle
+    // 6. Return Data
     return {
         spot,
         atmStrike,
         daysToExpiry: dte,
         configUsed: config,       
         marketCondition: signal,
-        // Send back ALL recommended options, not just one "chosenStrategy"
         recommendedStrategies: recommendedStrategies, 
         allStrategies: strategies 
     };
@@ -1142,8 +1147,17 @@ async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
 
     // 1. DYNAMIC SYMBOL MAPPING
     const indexMap = {
+        // NIFTY 50 Variations
         'NIFTY': 'NSE:NIFTY50-INDEX',
-        'BANKNIFTY': 'NSE:NIFTYBANK-INDEX', // Monthly Only (Tue)
+        'NIFTY 50': 'NSE:NIFTY50-INDEX',     // <--- Added this
+        'NIFTY50': 'NSE:NIFTY50-INDEX',
+        
+        // BANKNIFTY Variations
+        'BANKNIFTY': 'NSE:NIFTYBANK-INDEX',
+        'NIFTY BANK': 'NSE:NIFTYBANK-INDEX', // <--- Added this
+        'NIFTYBANK': 'NSE:NIFTYBANK-INDEX',
+        
+        // Others
         'FINNIFTY': 'NSE:FINNIFTY-INDEX',
         'MIDCPNIFTY': 'NSE:MIDCPNIFTY-INDEX',
         'SENSEX': 'BSE:SENSEX-INDEX',
