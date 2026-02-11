@@ -340,6 +340,10 @@ function App() {
             if (msg.type === 'CANDLE_CLOSE' || msg.type === 'TICK') {
                 // ... (Keep your existing candle logic here) ...
             }
+            if (msg.type === 'STATUS') {
+            console.log("System Alert:", msg.message);
+            // Optional: You could add a 'toast' notification here
+        }
 
             // NEW: Handle Multiple Trades P&L
             if (msg.type === 'PNL_UPDATE') {
@@ -427,7 +431,7 @@ function App() {
         setLiveDataLoading(true); setLiveDataError(null);
         try {
             // Construct URL with optional expiry parameter
-            let url = `${BACKEND_URL}/api/live-data-with-greeks/${symbol}`;
+            let url = `${BACKEND_URL}/api/live-data-with-greeks/${encodeURIComponent(symbol)}`;
             if (selectedExpiry) {
                 url += `?expiry=${selectedExpiry}`;
             }
@@ -513,7 +517,10 @@ function App() {
     };
 
     const handleSymbolChange = (e) => {
-        const newSymbol = e.target.value;
+        let newSymbol = e.target.value;
+        if(newSymbol.includes('&amp;')){
+           newSymbol = newSymbol.replace('&amp;', '&');
+        }
         setSymbol(newSymbol);
         setSelectedExpiry(''); // 🆕 RESET EXPIRY TO DEFAULT
         
@@ -698,7 +705,7 @@ function App() {
                                 <select className="w-full p-2 rounded border dark:bg-gray-700 dark:text-white dark:border-gray-600" value={symbol} onChange={handleSymbolChange} disabled={isLiveMode}>
                                     {Object.entries(SYMBOL_LIST).map(([cat, items]) => (
                                         <optgroup label={cat} key={cat}>
-                                            {items.map(s => <option key={s.symbol} value={s.symbol}>{s.name}</option>)}
+                                            {items.map(s => <option key={s.symbol} value={s.symbol}>{s.name.split('(')[0].trim()}</option>)}
                                         </optgroup>
                                     ))}
                                 </select>

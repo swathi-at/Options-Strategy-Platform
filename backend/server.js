@@ -26,6 +26,7 @@ app.use(express.json());
 const liveDataCache = {}; 
 const CACHE_DURATION_MS = 20 * 1000; 
 const LOG_FILE_PATH = path.join(__dirname, 'trade_logs.csv');
+const TOKEN_FILE = path.join(__dirname, '.fyers_token');
 // ⚠️ SIMULATION CONTROL ⚠️
 // Set to 'PAPER' to test with Live Data but Fake Money.
 // Set to 'LIVE' to send real orders to Fyers.
@@ -49,7 +50,8 @@ const FALLBACK_LOT_SIZES = {
     'BANKNIFTY': 15,      
     'FINNIFTY': 25,
     'MIDCPNIFTY': 50,
-    'SENSEX': 10
+    'SENSEX': 10,
+    'M&M':350
 };
 
 let fyersAccessToken = process.env.FYERS_TOKEN || null;
@@ -133,7 +135,7 @@ async function fetchLiveLotSizes() {
                     else if (symbolCode.includes('FINNIFTY')) rootSymbol = 'FINNIFTY';
                     else if (symbolCode.includes('MIDCPNIFTY')) rootSymbol = 'MIDCPNIFTY';
                     else {
-                        const match = symbolCode.match(/NSE:([A-Z]+)/);
+                        const match = symbolCode.match(/NSE:([A-Z&]+)/);
                         if (match) rootSymbol = match[1];
                     }
 
@@ -158,7 +160,7 @@ function getLotSizeForSymbol(symbol) {
     if (!symbol) return 1;
     let key = symbol.toUpperCase();
     if (key.includes('NSE:') && key.includes('-EQ')) key = key.split(':')[1].replace('-EQ', '');
-    else if (key.includes('NSE:')) key = key.replace('NSE:', '').split('-')[0];
+    else if (key.includes('NSE:')) key = key.replace('NSE:', '').split('-')[0].replace('AMP;','');
     
     if (key.includes('SENSEX')) key = 'SENSEX';
     if (key === 'NIFTY 50' || (key.includes('NIFTY') && !key.includes('BANK') && !key.includes('FIN') && !key.includes('MID'))) key = 'NIFTY';
@@ -803,6 +805,36 @@ function sensibullSelector(chain, spot, dte, signal="NEUTRAL", vix=15) { // Adde
     };
 }
 
+// ==================================================================
+// 💾 TOKEN PERSISTENCE HELPERS
+// ==================================================================
+function saveTokenLocal(token) {
+    try {
+        fs.writeFileSync(TOKEN_FILE, token, 'utf8');
+        console.log("💾 Token cached locally for the day.");
+    } catch (e) {
+        console.error("❌ Failed to save token:", e.message);
+    }
+}
+
+function loadTokenLocal() {
+    if (fs.existsSync(TOKEN_FILE)) {
+        const stats = fs.statSync(TOKEN_FILE);
+        const tokenDate = new Date(stats.mtime);
+        
+        // Fyers tokens expire daily. We check if the token was generated TODAY.
+        const today = new Date();
+        if (tokenDate.getDate() === today.getDate() && 
+            tokenDate.getMonth() === today.getMonth() && 
+            tokenDate.getFullYear() === today.getFullYear()) {
+            return fs.readFileSync(TOKEN_FILE, 'utf8');
+        }
+    }
+    return null;
+}
+
+
+
 // 7. AUTH ROUTES
 // ==================================================================
 app.post('/api/fyers/login', async (req, res) => {
@@ -837,6 +869,7 @@ app.post('/api/fyers/login', async (req, res) => {
 
         if (finalTokenRes.data?.access_token) {
             fyersAccessToken = finalTokenRes.data.access_token;
+            saveTokenLocal(fyersAccessToken);
             fyersAppId = FYERS_APP_ID;
             fyersLoginInstance.setAccessToken(fyersAccessToken);
             console.log("✅ LOGIN SUCCESS!");
@@ -854,42 +887,55 @@ app.post('/api/fyers/login', async (req, res) => {
 // ==================================================================
 
 // 1. CSV Report Generator (Runs at 09:30, 11:30, 13:30, 14:30)
+// 1. CSV Report Generator & Auto-Trade Scheduler
+// ==================================================================
+// 📅 AUTOMATED WORKFLOW: TRADES & REPORTS
+// ==================================================================
 function scheduleReports() {
-    const reportTimes = [
+    const tradeTimings = [
         { hour: 9, minute: 30 },
         { hour: 11, minute: 30 },
-        { hour: 13, minute: 30 },
-        { hour: 14, minute: 10 }
+        { hour: 13, minute: 30 }
     ];
 
-    reportTimes.forEach(t => {
+    tradeTimings.forEach(t => {
         const rule = new schedule.RecurrenceRule();
         rule.hour = t.hour;
         rule.minute = t.minute;
+        rule.dayOfWeek = new schedule.Range(1, 5); // Monday to Friday
 
+        // TRIGGER 1: Execute all 57 legs
         schedule.scheduleJob(rule, () => {
-            generateCSVReport(`Intraday_Report_${t.hour}${t.minute}`);
+            console.log(`🕒 AUTOMATION TRIGGER: Running ${t.hour}:${t.minute} Batch...`);
+            executeNeutralAutomatedTrade(); 
+        });
+
+        // TRIGGER 2: Generate Intraday Snapshot CSV (Snapshot of LIVE positions)
+        const reportRule = new schedule.RecurrenceRule();
+        reportRule.hour = t.hour;
+        reportRule.minute = t.minute + 2; 
+
+        schedule.scheduleJob(reportRule, () => {
+            const label = `Intraday_Full_Report_${t.hour}${t.minute}`;
+            generateCSVReport(label);
         });
     });
-    console.log("✅ Scheduled CSV Reports for 09:30, 11:30, 13:30, 14:30");
 }
-
 // ==================================================================
 // 📊 UPDATED CSV REPORT GENERATOR (MULTI-LEG & BATCHED)
 // ==================================================================
 async function generateCSVReport(filenameLabel) {
+    // 1. Check if we have positions (there should be ~20+ legs now!)
     if (livePositions.length === 0) {
         console.log(`[${filenameLabel}] No active positions to report.`);
         return;
     }
 
+    // 2. File naming logic
     const reportPath = path.join(__dirname, `${filenameLabel}_${new Date().toISOString().split('T')[0]}.csv`);
-    
-    // Header includes all requested fields [cite: 84-89]
-    const headers = "SnapshotTime,StartTime,Strategy,Symbol,Strike,Type,Action,EntryPrice,CurrentLTP,PnL,PnL_Percent,Delta\n";
+    const headers = "SnapshotTime,StartTime,Strategy,Symbol,Strike,Type,Action,EntryPrice,CurrentLTP,PnL,PnL_Percent\n";
 
     try {
-        // 1. BATCH FETCH: Get all unique symbols to stay within rate limits
         const uniqueSymbols = [...new Set(livePositions.map(pos => pos.instrument))].join(',');
         const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
             params: { symbols: uniqueSymbols }, 
@@ -900,42 +946,25 @@ async function generateCSVReport(filenameLabel) {
         let csvContent = headers;
         const now = new Date().toLocaleTimeString();
 
-        // 2. PROCESS EVERY LEG
+        // 3. Loop through ALL legs of ALL 7 strategies
         livePositions.forEach(pos => {
             const quote = allQuotes.find(q => q.n === pos.instrument);
             const currentLtp = quote?.v?.lp || 0;
-
-            // P&L Calculation logic [cite: 72]
             const multiplier = (pos.action === 'BUY') ? 1 : -1;
             const pnl = (currentLtp - pos.buyPrice) * pos.qty * multiplier;
             const pnlPercent = ((currentLtp - pos.buyPrice) / pos.buyPrice) * 100 * multiplier;
 
-            // 3. ASSEMBLE ROW [cite: 84-89]
-            const row = 
-                `${now},` + // Time of report snapshot
-                `${new Date(pos.timestamp).toLocaleTimeString()},` + // Start time of trade
-                `${pos.strategy},` + // Strategy name (e.g., Iron Condor)
-                `${pos.instrument},` + // Full Symbol
-                `${pos.strike},` + // Strike Price
-                `${pos.type},` + // CE or PE
-                `${pos.action},` + // BUY or SELL
-                `${pos.buyPrice.toFixed(2)},` + // Entry Price
-                `${currentLtp.toFixed(2)},` + // Current LTP
-                `${pnl.toFixed(2)},` + // Current P&L
-                `${pnlPercent.toFixed(2)}%,` + // P&L %
-                `N/A\n`; // Placeholder for Greeks (can be expanded)
-
+            const row = `${now},${new Date(pos.timestamp).toLocaleTimeString()},${pos.strategy},${pos.instrument},${pos.strike},${pos.type},${pos.action},${pos.buyPrice.toFixed(2)},${currentLtp.toFixed(2)},${pnl.toFixed(2)},${pnlPercent.toFixed(2)}%\n`;
             csvContent += row;
         });
 
-        fs.writeFileSync(reportPath, csvContent);
-        console.log(`✅ [${filenameLabel}] Report generated: ${reportPath}`);
+        fs.writeFileSync(reportPath, csvContent); // Creates the snapshot file
+        console.log(`✅ Intraday Snapshot Saved: ${filenameLabel}`);
 
     } catch (error) {
-        console.error(`❌ Failed to generate CSV report:`, error.message);
+        console.error(`❌ Snapshot Error:`, error.message);
     }
 }
-
 // 2. Auto Square-Off (Runs at 14:40 / 2:40 PM)
 function scheduleAutoSquareOff() {
     const rule = new schedule.RecurrenceRule();
@@ -1097,7 +1126,7 @@ function startAlgoManager() {
                 
                 // Stop Loss = 15%  | Target = 25% 
                 if (realPnl >= (investment * 0.25)) { 
-                    exitReason = "TARGET (25%)";
+                    exitReason = "TARGET HIT (25%)";
                 } else if (realPnl <= -(investment * 0.15)) { 
                     exitReason = "STOP LOSS (15%)";
                 }
@@ -1297,6 +1326,45 @@ async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
     };
 }
 // ==================================================================
+// 🛠️ INTERNAL EXECUTION ENGINE (THE BRAIN)
+// ==================================================================
+async function executeTradeInternal(payload) {
+    const { strategy, decisionData } = payload;
+    const executedLegs = [];
+
+    for (const leg of decisionData.legs) {
+        try {
+            let actualSymbol = leg.symbol || leg.greeks?.symbol; 
+            const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
+            const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
+            const quantity = (leg.qty || 1) * (correctLotSize || 1);
+            const entryPrice = leg.price || leg.greeks?.ltp || 0;
+
+            const newPosition = {
+                orderId: `AUTO-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+                instrument: actualSymbol,
+                buyPrice: entryPrice,
+                qty: quantity,
+                action: leg.action,
+                strategy: strategy,
+                strike: leg.strike,
+                type: leg.type || leg.optionType,
+                timestamp: new Date(),
+                pnl: 0
+            };
+            executedLegs.push(newPosition);
+        } catch (e) { console.error(`❌ Leg Failed: ${e.message}`); }
+    }
+
+    if (executedLegs.length > 0) {
+        livePositions = [...livePositions, ...executedLegs]; 
+        algoState.isInTrade = true;
+        broadcast({ type: 'STATUS', message: `✅ Auto-Trade: ${strategy}` });
+        return { success: true, positions: executedLegs };
+    }
+    throw new Error("Execution failed: No legs valid.");
+}
+// ==================================================================
 // 9. API ROUTES
 // ==================================================================
 app.get('/api/live-data/:symbol', async (req, res) => {
@@ -1347,142 +1415,38 @@ app.post('/api/decide-and-build-order', async (req, res) => {
         res.json(decision);
     } catch (error) { res.status(500).json({ error: "Engine Failed", details: error.message }); }
 });
+// 🧪 TEMPORARY TEST ROUTE: Trigger the 7-strategy automation manually
+app.get('/api/test-full-automation', async (req, res) => {
+    console.log("🚀 Starting MASTER MULTI-INDEX TEST...");
+    try {
+        // Execute the updated multi-index brain
+        await executeNeutralAutomatedTrade();
+        
+        // Wait 10 seconds for all ~60 legs to settle in memory
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        
+        // Generate a combined snapshot
+        await generateCSVReport(`MultiIndex_Test_Snapshot`);
 
+        res.json({ 
+            success: true, 
+            message: "Check terminal! You should see trades for Nifty, BankNifty, and Sensex." 
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ==================================================================
 // 🚀 TRADE EXECUTION ROUTE (LIVE + PAPER SUPPORT)
 // ==================================================================
 app.post('/api/execute-trade', async (req, res) => {
-    // 1. Auth Check
     if (!fyersAccessToken) return res.status(401).json({ error: 'Not authenticated.' });
-    
     try {
-        const { strategy, decisionData } = req.body;
-        
-        // 2. Validate Data
-        if (!decisionData || !decisionData.legs || decisionData.legs.length === 0) {
-            return res.status(400).json({ error: "Invalid trade data: No legs found." });
-        }
-
-        console.log(`\n🚀 Executing Strategy: ${strategy} (${decisionData.legs.length} Legs)`);
-        console.log(`📊 Execution Mode: ${TRADE_MODE}`); // Defined at top of file
-
-        const executedLegs = [];
-        const errors = [];
-
-        // OPTIMIZATION: Fetch Market Data ONCE if needed for symbol resolution
-        // (Instead of fetching inside the loop 4 times)
-        let fallbackMarketData = null;
-        const needsFallback = decisionData.legs.some(l => !l.symbol && !l.greeks?.symbol);
-        
-        if (needsFallback) {
-            console.log("🔍 Some symbols missing. Fetching live option chain for resolution...");
-            fallbackMarketData = await fetchMarketDataWithGreeks(algoState.symbol);
-        }
-
-        // 3. LOOP THROUGH LEGS
-        for (const leg of decisionData.legs) {
-            try {
-                // --- A. Resolve Symbol ---
-                let actualSymbol = leg.symbol || leg.greeks?.symbol; 
-
-                // Fallback Logic
-                if (!actualSymbol && fallbackMarketData) {
-                    const opt = fallbackMarketData.options.find(o => o.strike === Number(leg.strike));
-                    if (opt) {
-                        const type = leg.type || leg.optionType;
-                        actualSymbol = (type === 'CE') ? opt.CE?.symbol : opt.PE?.symbol;
-                    }
-                }
-
-                if (!actualSymbol) throw new Error(`Could not resolve symbol for Strike ${leg.strike}`);
-
-                // --- B. Calculate Quantity ---
-                // leg.qty is usually 'Lots' from the strategy engine.
-                // We multiply by Lot Size (e.g. 1 lot * 75 = 75 qty)
-                // Resolve the correct lot size dynamically for THIS symbol
-                const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
-                const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
-                const quantity = (leg.qty || 1) * (correctLotSize || 1);
-
-                // 🔍 DEBUG LOG (Add this line)
-                console.log(`🕵️ VERIFY: Symbol=${cleanSymbol} | Lots=${leg.qty} | LotSize=${correctLotSize} | FINAL QTY=${quantity}`);
-                const entryPrice = leg.price || leg.greeks?.ltp || 0;
-
-                console.log(`👉 [${leg.action}] ${quantity}x ${actualSymbol} @ ₹${entryPrice}`);
-
-                // --- C. EXECUTE BASED ON MODE ---
-                let orderId = `SIM-${Date.now()}-${Math.floor(Math.random()*1000)}`; // Default ID
-
-                if (TRADE_MODE === 'LIVE') {
-                    // 🔴 LIVE EXECUTION (Real Money)
-                    const fyers = new fyersModel();
-                    fyers.setAppId(fyersAppId);
-                    fyers.setAccessToken(fyersAccessToken);
-
-                    const orderReq = {
-                        symbol: actualSymbol,
-                        qty: quantity,
-                        type: 2, // Market Order
-                        side: leg.action === 'BUY' ? 1 : -1,
-                        productType: "MARGIN", // Intraday/Margin
-                        limitPrice: 0,
-                        stopPrice: 0,
-                        validity: "DAY",
-                        disclosedQty: 0,
-                        offlineOrder: false,
-                    };
-
-                    const response = await fyers.place_order(orderReq);
-                    if (response.s !== 'ok') throw new Error(response.message || "Order Failed");
-                    
-                    orderId = response.id;
-                    console.log(`✅ LIVE ORDER PLACED. ID: ${orderId}`);
-                
-                } else {
-                    // 🟢 PAPER EXECUTION
-                    console.log(`✅ SIMULATION SUCCESS. ID: ${orderId}`);
-                }
-
-                // --- D. RECORD POSITION (For P&L Tracking) ---
-                const newPosition = {
-                    orderId: orderId,
-                    instrument: actualSymbol,
-                    buyPrice: entryPrice,
-                    qty: quantity,
-                    action: leg.action,
-                    strategy: strategy,
-                    strike: leg.strike,
-                    type: leg.type || leg.optionType,
-                    timestamp: new Date(),
-                    pnl: 0 // Will be updated by P&L monitor
-                };
-
-                executedLegs.push(newPosition);
-
-            } catch (legError) {
-                console.error(`❌ Leg Failed (${leg.strike}):`, legError.message);
-                errors.push({ strike: leg.strike, error: legError.message });
-            }
-        }
-
-        // 4. Update Global Portfolio
-        if (executedLegs.length > 0) {
-            livePositions = [...livePositions, ...executedLegs];
-            algoState.isInTrade = true;
-
-            res.json({ 
-                success: true, 
-                message: `Executed ${executedLegs.length} legs (${TRADE_MODE}).`, 
-                positions: executedLegs,
-                errors: errors.length > 0 ? errors : null
-            });
-        } else {
-            res.status(500).json({ error: "All legs failed.", details: errors });
-        }
-
+        // This calls the "Brain" function you just pasted in Step 1
+        const result = await executeTradeInternal(req.body);
+        res.json(result);
     } catch (error) {
-        console.error("Critical Execution Error:", error.message);
-        res.status(500).json({ error: "Execution Failed", details: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -1636,4 +1600,142 @@ if (fyersAccessToken) {
 }
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); 
+// Wait 2 seconds for the server to fully initialize before logging in
+    setTimeout(triggerAutoLogin, 2000);
+
+});
+// ==================================================================
+// 🤖 AUTO-LOGIN TRIGGER
+// ==================================================================
+async function triggerAutoLogin() {
+    // 1. Try to load from local file first
+    const cachedToken = loadTokenLocal();
+    
+    if (cachedToken) {
+        fyersAccessToken = cachedToken;
+        fyersLoginInstance.setAccessToken(fyersAccessToken);
+        console.log("⚡ Reusing existing token from cache. No login needed!");
+        startAlgoSystem(); // Starts your WebSocket and Manager immediately
+        return;
+    }
+
+    // 2. If no cache, proceed with the automated login request
+    console.log("🤖 No valid token found. Starting automated login sequence...");
+    try {
+        const response = await axios.post(`http://localhost:${PORT}/api/fyers/login`);
+        if (response.data.success) {
+            console.log("✅ Auto-Login: Successfully authenticated.");
+        }
+    } catch (error) {
+        console.error("❌ Auto-Login Failed:", error.response?.data || error.message);
+    }
+}
+// ==================================================================
+// 🤖 AUTOMATED STRATEGY EXECUTION ENGINE
+// ==================================================================
+async function executeScheduledTrade(signalType = "NEUTRAL") {
+    console.log(`🕒 [${new Date().toLocaleTimeString()}] Starting Scheduled Trade Flow...`);
+    
+    if (!fyersAccessToken) {
+        console.error("❌ Scheduled Trade Failed: No Access Token");
+        return;
+    }
+
+    try {
+        const symbol = "NIFTY"; // Defaulting to NIFTY for automated runs
+        const marketData = await fetchMarketDataWithGreeks(symbol);
+        
+        // 1. Get Recommendation based on Signal
+        const decision = sensibullSelector(
+            marketData.options, 
+            marketData.spot, 
+            marketData.daysToExpiry, 
+            signalType, 
+            marketData.vix
+        );
+
+        if (decision.error || !decision.recommendedStrategies.length) {
+            console.log(`⚠️ Skip: ${decision.error || "No suitable strategies found."}`);
+            return;
+        }
+
+        // 2. Select the first recommended strategy (e.g., Iron Condor for Neutral)
+        const chosen = decision.recommendedStrategies[0];
+        console.log(`🎯 Engine Selected: ${chosen.name} for ${symbol}`);
+
+        // 3. Prepare Payload for Execution
+        const executionPayload = {
+            strategy: chosen.name,
+            decisionData: {
+                legs: chosen.legs,
+                symbol: symbol
+            }
+        };
+
+        // 4. Trigger the Execution Logic (Reuse your existing endpoint logic)
+        // We mock a request object to reuse your robust /api/execute-trade logic
+        const mockRes = { 
+            status: () => ({ json: (data) => console.log("✅ Execution Result:", data) }),
+            json: (data) => console.log("✅ Execution Result:", data) 
+        };
+        const mockReq = { body: executionPayload };
+
+        await app._router.stack.find(s => s.route?.path === '/api/execute-trade').route.stack[0].handle(mockReq, mockRes);
+
+    } catch (error) {
+        console.error("❌ Scheduled Execution Critical Error:", error.message);
+    }
+}
+// ==================================================================
+// 🤖 SPECIALIZED AUTOMATION: NIFTY 50 - IRON CONDOR ONLY
+// ==================================================================
+async function executeNeutralAutomatedTrade() {
+    // 1. Restrict only to NIFTY
+    const indicesToTrade = ["NIFTY"]; 
+    console.log(`🚀 [${new Date().toLocaleTimeString()}] Starting EXCLUSIVE NIFTY Iron Condor Execution...`);
+    
+    if (!fyersAccessToken) return console.error("❌ Auth Missing: Authentication required.");
+
+    for (const symbol of indicesToTrade) {
+        try {
+            const marketData = await fetchMarketDataWithGreeks(symbol);
+            const decision = sensibullSelector(
+                marketData.options, 
+                marketData.spot, 
+                marketData.daysToExpiry, 
+                "NEUTRAL", 
+                marketData.vix
+            );
+
+            if (decision.error || !decision.recommendedStrategies.length) {
+                console.log(`⚠️ Skipping ${symbol}: No strategies found.`);
+                continue; 
+            }
+
+            // 2. Filter specifically for "Iron Condor"
+            const ironCondorStrategy = decision.recommendedStrategies.find(s => s.name === "Iron Condor");
+
+            if (ironCondorStrategy) {
+                console.log(`🎯 Found Targeted Strategy: ${ironCondorStrategy.name} for ${symbol}`);
+                
+                const payload = {
+                    strategy: `${ironCondorStrategy.name} (${symbol})`, 
+                    decisionData: { 
+                        legs: ironCondorStrategy.legs, 
+                        symbol: symbol 
+                    }
+                };
+
+                // Execute the 4 legs of the Iron Condor
+                await executeTradeInternal(payload);
+                console.log(`✅ ${symbol} Iron Condor successfully deployed.`);
+            } else {
+                console.log(`❌ Iron Condor not recommended by selector for ${symbol} at this time.`);
+            }
+
+        } catch (error) {
+            console.error(`❌ Error in NIFTY-Specific loop:`, error.message);
+        }
+    }
+}
