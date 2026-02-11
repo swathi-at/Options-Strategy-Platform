@@ -1599,7 +1599,7 @@ if (fyersAccessToken) {
     startAlgoSystem();
 }
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5003;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); 
 // Wait 2 seconds for the server to fully initialize before logging in
     setTimeout(triggerAutoLogin, 2000);
