@@ -26,3 +26,16 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Python-Node Handshake file
+.flask_port
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# --- Automated Trade Reports ---
+# Excludes the specific interval files and the main log
+Trade_Exit_*.csv
+trade_logs.csv
+Intraday_Full_Report_*.csv
