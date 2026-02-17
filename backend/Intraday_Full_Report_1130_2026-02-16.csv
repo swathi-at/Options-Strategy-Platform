@@ -1,0 +1,7 @@
+SnapshotTime,StartTime,Strategy,Symbol,Strike,Type,Action,EntryPrice,CurrentLTP,PnL,PnL_Percent
+11:32:00 am,11:10:26 am,Long Straddle,NSE:NIFTY2621725550CE,undefined,undefined,BUY,78.20,73.90,-279.50,-5.50%
+11:32:00 am,11:10:26 am,Long Straddle,NSE:NIFTY2621725550PE,undefined,undefined,BUY,86.75,88.00,81.25,1.44%
+11:32:00 am,11:30:00 am,Iron Condor (NIFTY),NSE:NIFTY2621725100PE,undefined,undefined,BUY,9.40,9.30,-6.50,-1.06%
+11:32:00 am,11:30:01 am,Iron Condor (NIFTY),NSE:NIFTY2621725900CE,undefined,undefined,BUY,8.30,8.40,6.50,1.20%
+11:32:00 am,11:30:01 am,Iron Condor (NIFTY),NSE:NIFTY2621725300PE,undefined,undefined,SELL,20.80,20.15,42.25,3.13%
+11:32:00 am,11:30:01 am,Iron Condor (NIFTY),NSE:NIFTY2621725700CE,undefined,undefined,SELL,24.55,25.15,-39.00,-2.44%

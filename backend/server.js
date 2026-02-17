@@ -674,50 +674,66 @@ function chooseStrikeWithPreferences(chain, roundedTarget, side='PE', atmIndex=n
 
 // 5. THE CORE LOGIC (Team Lead's Implementation)
 function improvedStrikeSelection(chain, spot, dte) {
-    const interval = detectIntervalFromChain(chain);
-    
-    // Find ATM
-    let atmNode = chain[0];
-    let minDiff = Infinity;
-    chain.forEach(c => {
-        const d = Math.abs(c.strike - spot);
-        if(d < minDiff) { minDiff = d; atmNode = c; }
-    });
-    const atmIndex = chain.findIndex(x => x.strike === atmNode.strike);
+    // 1. Get the Symbol and its specific config
+    const symbol = chain[0].CE?.symbol || "NIFTY";
+    const config = getSensibullConfig(symbol); 
+    const isIndex = symbol.includes('NIFTY') || symbol.includes('BANK') || symbol.includes('SENSEX');
 
-    const atmIV = (atmNode && (atmNode.CE?.iv || atmNode.PE?.iv)) ? (atmNode.CE?.iv || atmNode.PE?.iv) : 15;
-    
-    const t = (dte < 1 ? 1 : dte) / 365;
-    const em = spot * (atmIV / 100) * Math.sqrt(t);
+    // 2. Determine the Strike Interval
+    // We use the config interval but fallback to auto-detection if it's a new stock
+    const interval = config.interval || detectIntervalFromChain(chain);
 
-    const lowerRaw = spot - em;
-    const upperRaw = spot + em;
-    const lowerRounded = roundToNearestStrike(lowerRaw, interval);
-    const upperRounded = roundToNearestStrike(upperRaw, interval);
+    // 3. Find the Manual ATM (The Anchor)
+    const atmStrike = Math.round(spot / interval) * interval;
+    const atmIndex = chain.findIndex(x => x.strike === atmStrike);
 
-    console.log(`🎯 TARGETS: Lower ${lowerRounded} | Upper ${upperRounded} (Interval: ${interval})`);
+    // 4. Calculate Expected Move (EM) for volatility awareness
+    const atmNode = chain[atmIndex] || chain[0];
+    const atmIV = (atmNode.CE?.iv || atmNode.PE?.iv) || 15;
+    const t = (dte < 1 ? 1 : dte) / 365;
+    const em = spot * (atmIV / 100) * Math.sqrt(t);
 
-    let sellPut = chooseStrikeWithPreferences(chain, lowerRounded, 'PE', atmIndex);
-    let sellCall = chooseStrikeWithPreferences(chain, upperRounded, 'CE', atmIndex);
+    // 5. THE HYBRID LOGIC:
+    // Manual builders use fixed 'Width' for Indices, 
+    // but use 'Expected Move' (Standard Deviation) for Stocks.
+    let lowerTarget, upperTarget;
 
-    if (!sellPut) sellPut = chooseByDelta(chain, 'PE', 0.16, atmIndex) || chain[Math.max(0, atmIndex - 2)];
-    if (!sellCall) sellCall = chooseByDelta(chain, 'CE', 0.16, atmIndex) || chain[Math.min(chain.length - 1, atmIndex + 2)];
+    if (isIndex) {
+        // Use your predefined Sensibull widths for Indices
+        lowerTarget = atmStrike - config.width;
+        upperTarget = atmStrike + config.width;
+    } else {
+        // For Stocks, use 1 Standard Deviation (EM) rounded to the nearest strike
+        // This is exactly how builders handle illiquid stock options
+        lowerTarget = Math.round((spot - em) / interval) * interval;
+        upperTarget = Math.round((spot + em) / interval) * interval;
+    }
 
-    if (sellPut.strike >= sellCall.strike) {
-        const fallbackLower = chain[Math.max(0, atmIndex - 4)] || chain[0];
-        const fallbackUpper = chain[Math.min(chain.length - 1, atmIndex + 4)] || chain[chain.length-1];
-        if (fallbackLower.strike < fallbackUpper.strike) {
-            sellPut = fallbackLower;
-            sellCall = fallbackUpper;
-        }
-    }
+    console.log(`📡 [${symbol}] Mode: ${isIndex ? 'FIXED' : 'DYNAMIC'} | ATM: ${atmStrike} | Range: ${lowerTarget} - ${upperTarget}`);
 
-    const sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
-    const sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
-    const buyPut = chain[Math.max(0, sellPutIndex - 2)] || chain[sellPutIndex];
-    const buyCall = chain[Math.min(chain.length - 1, sellCallIndex + 2)] || chain[sellCallIndex];
+    // 6. Select the Final Strikes
+    let sellPut = getStrikeByExactStrike(chain, lowerTarget);
+    let sellCall = getStrikeByExactStrike(chain, upperTarget);
 
-    return { atmNode, atmIndex, interval, sellPut, buyPut, sellCall, buyCall, expectedMove: Math.round(em) };
+    // 7. Define Wing Width (Hedges)
+    // Indices: 2 steps away | Stocks: 1 step away (standard for liquidity)
+    const wingStep = isIndex ? 2 : 1;
+    const sellPutIndex = chain.findIndex(x => x.strike === sellPut.strike);
+    const sellCallIndex = chain.findIndex(x => x.strike === sellCall.strike);
+
+    const buyPut = chain[Math.max(0, sellPutIndex - wingStep)] || chain[0];
+    const buyCall = chain[Math.min(chain.length - 1, sellCallIndex + wingStep)] || chain[chain.length - 1];
+
+    return { 
+        atmNode, 
+        atmIndex, 
+        interval, 
+        sellPut, 
+        buyPut, 
+        sellCall, 
+        buyCall, 
+        expectedMove: Math.round(em) 
+    };
 }
 
 // ==================================================================
@@ -970,46 +986,58 @@ function scheduleAutoSquareOff() {
     const rule = new schedule.RecurrenceRule();
     rule.hour = 14;
     rule.minute = 40;
+    rule.dayOfWeek = new schedule.Range(1, 5); // Monday to Friday
 
     schedule.scheduleJob(rule, async () => {
-        console.log("⏰ 2:40 PM ALERT: Initiating Auto Square-Off...");
+        console.log("⏰ 2:40 PM ALERT: Initiating LIVE Auto Square-Off...");
         
         if (livePositions.length === 0) {
             console.log("✅ No open positions to close.");
             return;
         }
 
-        // Loop and Close All
-        // We clone the array because we modify it while iterating in the manager
+        // Clone the array to iterate safely
         const positionsToClose = [...livePositions]; 
         
         for (const pos of positionsToClose) {
-             console.log(`🔻 Force Closing: ${pos.instrument}`);
-             
-             // In LIVE mode, you would trigger the API exit call here.
-             // Since we share logic with the AlgoManager, we can just mark it closed 
-             // or call a dedicated exit function if we extracted it.
-             
-             // For this sprint, we log it as closed in CSV and clear the array
-             const tradeRecord = {
-                 ...pos,
-                 endTime: new Date().toLocaleTimeString(),
-                 exitPrice: 0, // Should be Real LTP
-                 pnl: 0, // Should be Real PnL
-                 reason: "AUTO SQUARE-OFF (2:40 PM)"
-             };
-             logTradeToCSV(tradeRecord);
+             try {
+                 console.log(`🔻 Force Closing: ${pos.instrument}`);
+
+                 // 🚀 LIVE EXECUTION: Close on Exchange
+                 if (TRADE_MODE === 'LIVE') {
+                     const exitSide = pos.action === 'BUY' ? -1 : 1;
+                     const exitOrder = await placeLiveOrder(pos.instrument, pos.qty, exitSide);
+                     
+                     if (exitOrder.s !== 'ok') {
+                         console.error(`❌ Square-off failed for ${pos.instrument}:`, exitOrder.message);
+                         continue; // Don't log/remove if it didn't close
+                     }
+                 }
+
+                 // Log to CSV
+                 const tradeRecord = {
+                     ...pos,
+                     endTime: new Date().toLocaleTimeString(),
+                     exitPrice: 0, // In a real setup, you'd fetch LTP here
+                     pnl: 0, 
+                     reason: "AUTO SQUARE-OFF (2:40 PM)"
+                 };
+                 logTradeToCSV(tradeRecord);
+
+                 // Remove from memory
+                 livePositions = livePositions.filter(p => p.orderId !== pos.orderId);
+
+             } catch (err) {
+                 console.error(`❌ Critical error during square-off for ${pos.instrument}:`, err.message);
+             }
         }
         
-        livePositions = []; // WIPE ALL POSITIONS
         algoState.isInTrade = false;
-        
-        broadcast({ type: 'TRADE_CLOSE', message: 'ALL TRADES CLOSED (2:40 PM Auto-Square Off)' });
-        console.log("✅ Auto Square-Off Complete.");
+        broadcast({ type: 'TRADE_CLOSE', message: 'ALL LIVE TRADES CLOSED (2:40 PM Auto-Square Off)' });
+        console.log("✅ Auto Square-Off Sequence Complete.");
     });
-    console.log("✅ Scheduled Auto Square-Off for 14:40");
+    console.log("✅ Scheduled Live Auto Square-Off for 14:40 Mon-Fri");
 }
-
 
 // ==================================================================
 // 8. ALGO & DATA HELPERS
@@ -1078,15 +1106,11 @@ async function runSignalLogic() {
 // ==================================================================
 function startAlgoManager() {
     setInterval(async () => {
-        // 1. Only run if we have active positions and an access token
         if (!fyersAccessToken || livePositions.length === 0) return;
 
         try {
-            // 2. BATCHING: Get all unique symbols from active positions
-            // This prevents sending multiple individual requests
             const uniqueSymbols = [...new Set(livePositions.map(pos => pos.instrument || pos.symbol))].join(',');
 
-            // 3. SINGLE API CALL: Fetch all quotes at once to avoid Status 429
             const quotesRes = await axios.get(`${FYERS_API_DATA_URL_V3}/quotes`, { 
                 params: { symbols: uniqueSymbols }, 
                 headers: { 'Authorization': `${fyersAppId}:${fyersAccessToken}` } 
@@ -1094,22 +1118,17 @@ function startAlgoManager() {
 
             const allQuotes = quotesRes.data.d || [];
 
-            // 4. PROCESS POSITIONS (Iterate backwards to safely remove closed items)
             for (let i = livePositions.length - 1; i >= 0; i--) {
                 const pos = livePositions[i];
-                
-                // Find the specific LTP for this leg from our batched data
                 const quote = allQuotes.find(q => q.n === (pos.instrument || pos.symbol));
                 const ltp = quote?.v?.lp;
 
                 if (!ltp) continue;
 
-                // 5. Calculate P&L (Direction Aware)
                 const multiplier = (pos.action === 'BUY') ? 1 : -1;
                 const realPnl = (ltp - pos.buyPrice) * pos.qty * multiplier;
                 const pnlPercent = ((ltp - pos.buyPrice) / pos.buyPrice) * 100 * multiplier;
 
-                // 6. Broadcast Update to Frontend UI
                 broadcast({ 
                     type: 'PNL_UPDATE', 
                     tradeId: pos.orderId, 
@@ -1120,41 +1139,65 @@ function startAlgoManager() {
                     ltp: ltp 
                 });
 
-                // 7. Check Exit Conditions (FINAL PHASE REQUIREMENTS) [cite: 67-71]
                 let exitReason = null;
                 const investment = pos.buyPrice * pos.qty;
                 
-                // Stop Loss = 15%  | Target = 25% 
                 if (realPnl >= (investment * 0.25)) { 
-                    exitReason = "TARGET HIT (25%)";
+                    exitReason = "TARGET_HIT_25";
                 } else if (realPnl <= -(investment * 0.15)) { 
-                    exitReason = "STOP LOSS (15%)";
+                    exitReason = "STOP_LOSS_15";
                 }
 
-                // 8. Close Trade & Log to CSV
-                // ... inside startAlgoManager loop ...
                 if (exitReason) {
-                    const tradeRecord = {
-                        ...pos,
-                        endTime: new Date().toLocaleTimeString(), // Captures the exact exit time [cite: 90]
-                        exitPrice: ltp,
-                        pnl: realPnl,
-                        reason: exitReason // Logs if it was Target, SL, or Auto-Square Off [cite: 90]
-                    };
-                    logTradeToCSV(tradeRecord); // Writes the final row to trade_logs.csv
-                    livePositions.splice(i, 1); 
-                    broadcast({ type: 'TRADE_CLOSE', message: `Trade ${pos.instrument} Closed: ${exitReason}` });
+                    const strategyToKill = pos.strategy;
+                    
+                    // 🟢 UNIQUE FILENAME FOR EACH INTERVAL
+                    // Converts "11:30:05 AM" to "11_30_05_AM"
+                    const timeStamp = new Date().toLocaleTimeString().replace(/:/g, '_').replace(/ /g, '_');
+                    const dateStamp = new Date().toISOString().split('T')[0];
+                    const fileName = `Trade_Exit_${strategyToKill.replace(/ /g, '_')}_${dateStamp}_${timeStamp}.csv`;
+                    const finalReportPath = path.join(__dirname, fileName);
+
+                    console.log(`🚨 EXIT: ${exitReason}. Generating Unique Interval File: ${fileName}`);
+
+                    const strategyLegs = livePositions.filter(p => p.strategy === strategyToKill);
+                    let csvContent = "ExitTime,Symbol,Strike,Type,Action,EntryPrice,ExitPrice,LegPnL,Reason\n";
+                    let totalStrategyPnL = 0;
+
+                    for (const leg of strategyLegs) {
+                        try {
+                            const exitPrice = (leg.instrument === pos.instrument) ? ltp : (leg.currentLtp || 0);
+                            const multiplierLeg = (leg.action === 'BUY') ? 1 : -1;
+                            const legPnl = (exitPrice - leg.buyPrice) * leg.qty * multiplierLeg;
+                            totalStrategyPnL += legPnl;
+
+                            if (TRADE_MODE === 'LIVE') {
+                                const exitSide = leg.action === 'BUY' ? -1 : 1;
+                                await placeLiveOrder(leg.instrument, leg.qty, exitSide);
+                                await new Promise(resolve => setTimeout(resolve, 300));
+                            }
+
+                            csvContent += `${new Date().toLocaleTimeString()},${leg.instrument},${leg.strike},${leg.type},${leg.action},${leg.buyPrice.toFixed(2)},${exitPrice.toFixed(2)},${legPnl.toFixed(2)},${exitReason}\n`;
+                        } catch (err) {
+                            console.error(`❌ Error exiting leg:`, err.message);
+                        }
+                    }
+
+                    // 🟢 ADD SUMMARY ROW
+                    csvContent += `\n,,,,,TOTAL STRATEGY PNL,,${totalStrategyPnL.toFixed(2)},\n`;
+
+                    fs.writeFileSync(finalReportPath, csvContent);
+                    console.log(`✅ CSV SAVED for this interval: ${fileName}`);
+
+                    livePositions = livePositions.filter(p => p.strategy !== strategyToKill);
+                    break; 
                 }
             }
-
         } catch (e) {
             console.error(`Manager Batch Error:`, e.message);
         }
-        
-        // Update global trading state
         algoState.isInTrade = livePositions.length > 0;
-
-    }, 5000); // Increased interval to 5s to stay well within Fyers API limits
+    }, 5000);
 }
 
 async function placeLiveOrder(symbol, qty, side, isAMO = false) {
@@ -1326,43 +1369,70 @@ async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
     };
 }
 // ==================================================================
-// 🛠️ INTERNAL EXECUTION ENGINE (THE BRAIN)
+// 🚀 MARGIN-OPTIMIZED EXECUTION ENGINE (BUY-FIRST SEQUENCE)
+// ==================================================================
+// ==================================================================
+// 🛡️ ALL-OR-NOTHING EXECUTION (WITH AUTO-REVERSION)
 // ==================================================================
 async function executeTradeInternal(payload) {
     const { strategy, decisionData } = payload;
     const executedLegs = [];
+    let allLegsSuccessful = true;
 
-    for (const leg of decisionData.legs) {
+    // 1. Sort: BUY legs first for margin shielding
+    const buyLegs = decisionData.legs.filter(l => l.action === 'BUY');
+    const sellLegs = decisionData.legs.filter(l => l.action === 'SELL');
+    const sortedLegs = [...buyLegs, ...sellLegs];
+
+    for (const leg of sortedLegs) {
         try {
             let actualSymbol = leg.symbol || leg.greeks?.symbol; 
             const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
-            const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
-            const quantity = (leg.qty || 1) * (correctLotSize || 1);
-            const entryPrice = leg.price || leg.greeks?.ltp || 0;
+            const quantity = (leg.qty || 1) * (getLotSizeForSymbol(cleanSymbol) || 1);
 
-            const newPosition = {
-                orderId: `AUTO-${Date.now()}-${Math.floor(Math.random()*1000)}`,
-                instrument: actualSymbol,
-                buyPrice: entryPrice,
-                qty: quantity,
-                action: leg.action,
-                strategy: strategy,
-                strike: leg.strike,
-                type: leg.type || leg.optionType,
-                timestamp: new Date(),
-                pnl: 0
-            };
-            executedLegs.push(newPosition);
-        } catch (e) { console.error(`❌ Leg Failed: ${e.message}`); }
+            if (TRADE_MODE === 'LIVE') {
+                const side = leg.action === 'BUY' ? 1 : -1;
+                console.log(`🚀 PLACING ${leg.action}: ${quantity} ${actualSymbol}`);
+                const orderResult = await placeLiveOrder(actualSymbol, quantity, side);
+                
+                if (orderResult.s !== 'ok') {
+                    allLegsSuccessful = false;
+                    throw new Error(orderResult.message);
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 300)); // Delay for margin update
+
+                executedLegs.push({
+                    orderId: orderResult.id,
+                    instrument: actualSymbol,
+                    buyPrice: leg.price || 0,
+                    qty: quantity,
+                    action: leg.action,
+                    strategy: strategy,
+                    timestamp: new Date()
+                });
+            }
+        } catch (e) {
+            console.error(`❌ Leg Failed: ${e.message}`);
+            allLegsSuccessful = false;
+            break; // Stop placing further legs
+        }
     }
 
-    if (executedLegs.length > 0) {
-        livePositions = [...livePositions, ...executedLegs]; 
-        algoState.isInTrade = true;
-        broadcast({ type: 'STATUS', message: `✅ Auto-Trade: ${strategy}` });
-        return { success: true, positions: executedLegs };
+    // 🚀 EMERGENCY REVERSION: If any leg failed, close the ones that succeeded immediately
+    if (!allLegsSuccessful && executedLegs.length > 0) {
+        console.log("⚠️ STRATEGY BROKEN: Reverting successful legs to prevent unhedged risk...");
+        for (const leg of executedLegs) {
+            const exitSide = leg.action === 'BUY' ? -1 : 1;
+            await placeLiveOrder(leg.instrument, leg.qty, exitSide);
+        }
+        throw new Error("Strategy Deployment Failed: All legs reverted.");
     }
-    throw new Error("Execution failed: No legs valid.");
+
+    if (allLegsSuccessful) {
+        livePositions = [...livePositions, ...executedLegs];
+        broadcast({ type: 'STATUS', message: `✅ Successfully Deployed: ${strategy}` });
+    }
 }
 // ==================================================================
 // 9. API ROUTES
@@ -1453,17 +1523,30 @@ app.post('/api/execute-trade', async (req, res) => {
 app.post('/api/python-calculation', async (req, res) => {
     try {
         const payload = req.body;
-        console.log("🚀 Sending data to Flask Engine...");
+        
+        // 1. Determine the Dynamic Port
+        let flaskPort = 5001; // Default fallback if file is missing
+        const portFile = path.join(__dirname, '.flask_port');
 
-        // CALL FLASK (Port 5001)
-        const pythonRes = await axios.post('http://127.0.0.1:5001/calculate-strategy', payload);
+        if (fs.existsSync(portFile)) {
+            // Read the port number saved by Python
+            flaskPort = fs.readFileSync(portFile, 'utf8').trim();
+        }
 
-        // Return Python's answer to Frontend
+        console.log(`🐍 Forwarding Greeks data to Flask on Port: ${flaskPort}`);
+
+        // 2. Execute the Request
+        const pythonRes = await axios.post(`http://127.0.0.1:${flaskPort}/calculate-strategy`, payload);
+
+        // 3. Send Greeks back to Frontend
         res.json(pythonRes.data);
 
     } catch (error) {
         console.error("❌ Flask Connection Failed:", error.message);
-        res.status(500).json({ error: "Python Engine unavailable" });
+        res.status(500).json({ 
+            error: "Python Engine unavailable",
+            details: "Check if app.py is running and .flask_port exists."
+        });
     }
 });
 
@@ -1599,7 +1682,7 @@ if (fyersAccessToken) {
     startAlgoSystem();
 }
 
-const PORT = process.env.PORT || 5003;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); 
 // Wait 2 seconds for the server to fully initialize before logging in
     setTimeout(triggerAutoLogin, 2000);
