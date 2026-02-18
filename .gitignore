@@ -30,6 +30,7 @@ yarn-error.log*
 # Python-Node Handshake file
 .flask_port
 .wss_port
+.api_port
 
 # Python bytecode
 __pycache__/

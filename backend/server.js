@@ -1722,12 +1722,36 @@ if (fyersAccessToken) {
     startAlgoSystem();
 }
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); 
-// Wait 2 seconds for the server to fully initialize before logging in
-    setTimeout(triggerAutoLogin, 2000);
+// ==================================================================
+// 🚀 DYNAMIC MAIN SERVER STARTUP (Fixes Port 5000 Mac Error)
+// ==================================================================
+function startMainServer(portToTry) {
+    const server = app.listen(portToTry);
 
-});
+    server.on('listening', () => {
+        console.log(`✅ Main Server running on port ${portToTry}`);
+        
+        // Save the active API port so the frontend/python knows where we are
+        fs.writeFileSync(path.join(__dirname, '.api_port'), portToTry.toString());
+
+        // Wait 2 seconds for the server to fully initialize before logging in
+        setTimeout(triggerAutoLogin, 2000);
+    });
+
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.log(`⚠️ API Port ${portToTry} busy (common on Mac), trying ${portToTry + 1}...`);
+            startMainServer(portToTry + 1); // Increment and try again
+        } else {
+            console.error("❌ Critical Server Error:", err.message);
+        }
+    });
+}
+
+// Start looking from 5000
+const START_PORT = process.env.PORT || 5000;
+startMainServer(Number(START_PORT));
+
 // ==================================================================
 // 🤖 AUTO-LOGIN TRIGGER
 // ==================================================================
