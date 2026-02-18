@@ -178,25 +178,65 @@ fetchLiveLotSizes();
 // ==================================================================
 // 4. UI DASHBOARD WEBSOCKET
 // ==================================================================
-const wss = new WebSocketServer({ port: 8080 });
+// ==================================================================
+// 4. UI DASHBOARD WEBSOCKET (DYNAMIC PORT RESOLUTION)
+// ==================================================================
+const net = require('net');
 let uiClients = new Set(); 
+let wss; // Defined globally so broadcast() can access it
 
-wss.on('connection', (ws) => {
-    console.log('✅ UI Dashboard Connected');
-    uiClients.add(ws);
-    if(candleHistory.length > 0) {
-        ws.send(JSON.stringify({ type: 'HISTORY', data: candleHistory }));
-    }
-    ws.send(JSON.stringify({ type: 'STATUS', message: 'Connected to Bot Server.' }));
-    ws.on('close', () => { uiClients.delete(ws); });
-});
+function initializeWSS(startPort) {
+    const tester = net.createServer();
 
-function broadcast(data) {
-    const message = JSON.stringify(data);
-    uiClients.forEach(client => { if (client.readyState === 1) client.send(message); });
+    // If the port is busy, this error triggers
+    tester.once('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.log(`⚠️ WebSocket Port ${startPort} busy, trying ${startPort + 1}...`);
+            initializeWSS(startPort + 1); // Recursive call to try next port
+        }
+    });
+
+    // If the port is free, this triggers
+    tester.once('listening', () => {
+        tester.close(); // Close the tester so we can start the real WebSocket
+        
+        wss = new WebSocketServer({ port: startPort });
+        console.log(`✅ UI Dashboard WebSocket Server successfully started on port ${startPort}`);
+        
+        // Write the port to a file so other parts of the system (or frontend) can find it
+        fs.writeFileSync(path.join(__dirname, '.wss_port'), startPort.toString());
+
+        wss.on('connection', (ws) => {
+            console.log('✅ UI Dashboard Connected');
+            uiClients.add(ws);
+            
+            if(candleHistory.length > 0) {
+                ws.send(JSON.stringify({ type: 'HISTORY', data: candleHistory }));
+            }
+            
+            ws.send(JSON.stringify({ 
+                type: 'STATUS', 
+                message: `Connected to Bot Server on port ${startPort}.` 
+            }));
+
+            ws.on('close', () => { uiClients.delete(ws); });
+        });
+    });
+
+    tester.listen(startPort);
 }
-console.log('UI Dashboard WebSocket Server started on port 8080.');
 
+// Kick off the initialization
+initializeWSS(8080);
+
+// Updated broadcast function to check if wss is initialized
+function broadcast(data) {
+    if (!wss) return; // Prevent errors if broadcasting before WSS is ready
+    const message = JSON.stringify(data);
+    uiClients.forEach(client => { 
+        if (client.readyState === 1) client.send(message); 
+    });
+}
 // ==================================================================
 // 5. LOGIC: GREEKS CALCULATOR
 // ==================================================================
