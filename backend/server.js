@@ -1417,64 +1417,41 @@ async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
 async function executeTradeInternal(payload) {
     const { strategy, decisionData } = payload;
     const executedLegs = [];
-    let allLegsSuccessful = true;
 
-    // 1. Sort: BUY legs first for margin shielding
-    const buyLegs = decisionData.legs.filter(l => l.action === 'BUY');
-    const sellLegs = decisionData.legs.filter(l => l.action === 'SELL');
-    const sortedLegs = [...buyLegs, ...sellLegs];
-
-    for (const leg of sortedLegs) {
+    for (const leg of decisionData.legs) {
         try {
             let actualSymbol = leg.symbol || leg.greeks?.symbol; 
             const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
-            const quantity = (leg.qty || 1) * (getLotSizeForSymbol(cleanSymbol) || 1);
+            const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
+            const quantity = (leg.qty || 1) * (correctLotSize || 1);
+            const entryPrice = leg.price || leg.greeks?.ltp || 0;
 
-            if (TRADE_MODE === 'LIVE') {
-                const side = leg.action === 'BUY' ? 1 : -1;
-                console.log(`🚀 PLACING ${leg.action}: ${quantity} ${actualSymbol}`);
-                const orderResult = await placeLiveOrder(actualSymbol, quantity, side);
-                
-                if (orderResult.s !== 'ok') {
-                    allLegsSuccessful = false;
-                    throw new Error(orderResult.message);
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 300)); // Delay for margin update
-
-                executedLegs.push({
-                    orderId: orderResult.id,
-                    instrument: actualSymbol,
-                    buyPrice: leg.price || 0,
-                    qty: quantity,
-                    action: leg.action,
-                    strategy: strategy,
-                    timestamp: new Date()
-                });
-            }
-        } catch (e) {
-            console.error(`❌ Leg Failed: ${e.message}`);
-            allLegsSuccessful = false;
-            break; // Stop placing further legs
-        }
+            const newPosition = {
+                orderId: `AUTO-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+                instrument: actualSymbol,
+                buyPrice: entryPrice,
+                qty: quantity,
+                action: leg.action,
+                strategy: strategy,
+                strike: leg.strike,
+                type: leg.type || leg.optionType,
+                timestamp: new Date(),
+                pnl: 0
+            };
+            executedLegs.push(newPosition);
+        } catch (e) { console.error(`❌ Leg Failed: ${e.message}`); }
     }
 
-    // 🚀 EMERGENCY REVERSION: If any leg failed, close the ones that succeeded immediately
-    if (!allLegsSuccessful && executedLegs.length > 0) {
-        console.log("⚠️ STRATEGY BROKEN: Reverting successful legs to prevent unhedged risk...");
-        for (const leg of executedLegs) {
-            const exitSide = leg.action === 'BUY' ? -1 : 1;
-            await placeLiveOrder(leg.instrument, leg.qty, exitSide);
-        }
-        throw new Error("Strategy Deployment Failed: All legs reverted.");
+    if (executedLegs.length > 0) {
+        livePositions = [...livePositions, ...executedLegs]; 
+        algoState.isInTrade = true;
+        broadcast({ type: 'STATUS', message: `✅ Auto-Trade: ${strategy}` });
+        return { success: true, positions: executedLegs };
     }
-
-    if (allLegsSuccessful) {
-        livePositions = [...livePositions, ...executedLegs];
-        broadcast({ type: 'STATUS', message: `✅ Successfully Deployed: ${strategy}` });
-    }
+    throw new Error("Execution failed: No legs valid.");
 }
-// ==================================================================
+
+//=================================================================
 // 9. API ROUTES
 // ==================================================================
 app.get('/api/live-data/:symbol', async (req, res) => {
