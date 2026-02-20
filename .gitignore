@@ -41,3 +41,14 @@ __pycache__/
 Trade_Exit_*.csv
 trade_logs.csv
 Intraday_Full_Report_*.csv
+
+# Local session tokens
+.fyers_token
+
+# Environment variables (secondary check)
+.env*
+
+# Python virtual environment (if you use one)
+venv/
+env/
+.venv/

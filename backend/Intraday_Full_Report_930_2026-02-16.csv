@@ -1,3 +1,0 @@
-SnapshotTime,StartTime,Strategy,Symbol,Strike,Type,Action,EntryPrice,CurrentLTP,PnL,PnL_Percent
-9:32:00 am,9:30:00 am,Iron Condor (NIFTY),NSE:NIFTY2621725050PE,25050,PE,BUY,10.10,9.40,-45.50,-6.93%
-9:32:00 am,9:30:00 am,Iron Condor (NIFTY),NSE:NIFTY2621725850CE,25850,CE,BUY,9.15,10.00,55.25,9.29%

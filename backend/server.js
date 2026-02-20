@@ -1740,19 +1740,26 @@ async function triggerAutoLogin() {
         fyersAccessToken = cachedToken;
         fyersLoginInstance.setAccessToken(fyersAccessToken);
         console.log("⚡ Reusing existing token from cache. No login needed!");
-        startAlgoSystem(); // Starts your WebSocket and Manager immediately
+        startAlgoSystem(); 
         return;
     }
 
-    // 2. If no cache, proceed with the automated login request
+    // 2. Fix: Get the port from the file we just wrote during startup
     console.log("🤖 No valid token found. Starting automated login sequence...");
     try {
-        const response = await axios.post(`http://localhost:${PORT}/api/fyers/login`);
+        const portToUse = fs.readFileSync(path.join(__dirname, '.api_port'), 'utf8');
+        const response = await axios.post(`http://localhost:${portToUse}/api/fyers/login`);
         if (response.data.success) {
             console.log("✅ Auto-Login: Successfully authenticated.");
         }
     } catch (error) {
-        console.error("❌ Auto-Login Failed:", error.response?.data || error.message);
+        // Fallback to 5000 if the file read fails
+        console.error("❌ Auto-Login Failed, retrying on default port 5000...");
+        try {
+            await axios.post(`http://localhost:5000/api/fyers/login`);
+        } catch (innerError) {
+            console.error("❌ Manual Login Required. Visit the UI to authenticate.");
+        }
     }
 }
 // ==================================================================
