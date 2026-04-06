@@ -822,7 +822,7 @@ function sensibullSelector(chain, spot, dte, signal="NEUTRAL", vix=15) { // Adde
     let recommendedStrategies = [];
 
     // Rule: High VIX Safety Guard 
-    if (vix > 20) {
+    if (vix > 28) {
         return { error: `VIX is too high (${vix}). Trading halted for safety.` };
     }
 
