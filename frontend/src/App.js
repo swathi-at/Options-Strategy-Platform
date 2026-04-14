@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import TradePanel from "./components/TradePanel"; 
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ComposedChart, Area, Bar, Legend, ReferenceArea } from "recharts";
+import TradePanel from "./components/TradePanel"; // <-- THIS WAS MISSING
 import SYMBOL_LIST, { SYMBOL_LOT_SIZES, SYMBOL_STRIKE_INCREMENT, SYMBOL_CONFIG_KEY_MAP } from './constants'; 
 import AlgoDashboard from "./components/AlgoDashboard";
 
@@ -68,6 +68,162 @@ const LiveCandleChart = ({ data }) => {
                     />
                     <Line type="monotone" dataKey="close" stroke="#8884d8" dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
+            </ResponsiveContainer>
+        </div>
+    );
+};
+
+const SensibullPayoffChart = ({ data, spot, sdMarkers }) => {
+    if (!data || data.length === 0) return null;
+
+    // Calculate split for Green/Red gradient based on 0 crossover
+    const maxVal = Math.max(...data.map(d => Math.max(d.payoff, d.currentPayoff || 0)));
+    const minVal = Math.min(...data.map(d => Math.min(d.payoff, d.currentPayoff || 0)));
+    
+    let off = 0;
+    if (maxVal > 0 && minVal < 0) {
+        off = maxVal / (maxVal - minVal);
+    } else if (maxVal <= 0) {
+        off = 0; // All red
+    } else if (minVal >= 0) {
+        off = 1; // All green
+    }
+
+    // This function builds the floating white box you see when hovering
+    const CustomTooltip = ({ active, payload, label }) => {
+        if (active && payload && payload.length) {
+            return (
+                <div className="bg-white p-3 border rounded shadow-lg text-sm font-sans min-w-[200px]">
+                    {/* Shows the exact Spot Price you are hovering over */}
+                    <p className="font-bold text-gray-700 mb-2 border-b pb-1">Spot: {label}</p>
+                    
+                    {/* Loops through the blue line and green/red line values */}
+                    {payload.map((entry, index) => {
+                        if (entry.dataKey === 'callOI' || entry.dataKey === 'putOI' || entry.name === 'On Expiry Fill') return null;
+                        
+                        const isPositive = entry.value >= 0;
+                        const color = entry.name === "On Target Date" ? "#2563eb" : (isPositive ? "#16a34a" : "#dc2626");
+                        
+                        return (
+                            <div key={index} className="flex justify-between py-1">
+                                <span className="text-gray-600">{entry.name}:</span>
+                                <span style={{ color: color }} className="font-bold">
+                                    {/* The actual ₹ value */}
+                                    ₹{Number(entry.value).toFixed(2)}
+                                </span>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+        return null;
+    };
+    return (
+        <div className="h-[500px] w-full mt-4 bg-white p-4 rounded-lg">
+            <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={data} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                    <defs>
+                        {/* Shaded Area Gradient for Expiry Line - INCREASED OPACITY */}
+                        <linearGradient id="splitColor" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset={off} stopColor="#0aeb5c" stopOpacity={0.35} /> {/* Increased from 0.1 */}
+                            <stop offset={off} stopColor="#f00e0e" stopOpacity={0.25} /> {/* Increased from 0.05 */}
+                        </linearGradient>
+                        
+                        {/* Shaded Pattern for Standard Deviation Areas (Sensibull Style) */}
+                        <pattern id="diagonalHatch" patternUnits="userSpaceOnUse" width="4" height="4">
+                            {/* Darkened the SD lines slightly from #e5e7eb to #d1d5db */}
+                            <path d="M-1,1 l2,-2 M0,4 l4,-4 M3,5 l2,-2" style={{ stroke: '#d1d5db', strokeWidth: 1.5 }} />
+                        </pattern>
+                    </defs>
+                    
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.3} vertical={false} />
+                    
+                    <XAxis 
+                        dataKey="spot" 
+                        tick={{ fontSize: 11, fill: '#6b7280' }} 
+                        tickFormatter={(val) => val.toFixed(0)} 
+                        domain={['dataMin', 'dataMax']}
+                        type="number"
+                    />
+                    
+                    {/* Primary Y-Axis for P&L */}
+                    <YAxis 
+                        yAxisId="left" 
+                        tick={{ fontSize: 11, fill: '#6b7280' }} 
+                        tickFormatter={(val) => val.toLocaleString('en-IN')}
+                        domain={[minVal * 1.1, maxVal * 1.1]}
+                    />
+                    
+                    {/* Secondary Y-Axis for Open Interest */}
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: '#9ca3af' }} tickFormatter={(val) => `${(val/100000).toFixed(1)}L`} />
+                    
+                    <Tooltip content={<CustomTooltip />} />
+                    <Legend verticalAlign="top" align="left" iconType="circle" wrapperStyle={{ paddingBottom: '20px' }} />
+
+                    {/* Standard Deviation Bands */}
+                    {sdMarkers && (
+                        <>
+                            <ReferenceArea x1={sdMarkers.minus2} x2={sdMarkers.minus1} yAxisId="left" fill="url(#diagonalHatch)" />
+                            <ReferenceArea x1={sdMarkers.plus1} x2={sdMarkers.plus2} yAxisId="left" fill="url(#diagonalHatch)" />
+                            <ReferenceLine x={sdMarkers.minus1} yAxisId="left" stroke="#d1d5db" strokeDasharray="3 3" label={{ position: 'top', value: '-1SD', fill: '#9ca3af', fontSize: 10 }} />
+                            <ReferenceLine x={sdMarkers.plus1} yAxisId="left" stroke="#d1d5db" strokeDasharray="3 3" label={{ position: 'top', value: '1SD', fill: '#9ca3af', fontSize: 10 }} />
+                            <ReferenceLine x={sdMarkers.minus2} yAxisId="left" stroke="#d1d5db" strokeDasharray="3 3" label={{ position: 'top', value: '-2SD', fill: '#9ca3af', fontSize: 10 }} />
+                            <ReferenceLine x={sdMarkers.plus2} yAxisId="left" stroke="#d1d5db" strokeDasharray="3 3" label={{ position: 'top', value: '2SD', fill: '#9ca3af', fontSize: 10 }} />
+                        </>
+                    )}
+
+                    {/* Horizontal Zero Line */}
+                    <ReferenceLine y={0} yAxisId="left" stroke="#9ca3af" strokeWidth={1} />
+                    
+                    {/* Vertical Spot Price Line */}
+                    {spot && (
+                        <ReferenceLine 
+                            x={spot} 
+                            yAxisId="left" 
+                            stroke="#f10e0e" 
+                            strokeWidth={1}
+                            label={{ position: 'top', value: `Current price: ${spot.toFixed(2)}`, fill: '#374151', fontSize: 11, backgroundColor: 'white', padding: 2, border: '1px solid #e5e7eb' }} 
+                        />
+                    )}
+
+                    {/* Open Interest Bars (Sensibull Style: Thin, Bottom Aligned) */}
+                    <Bar dataKey="callOI" yAxisId="right" fill="#f30f0f" opacity={0.6} barSize={2} name="Call OI" />
+                    <Bar dataKey="putOI" yAxisId="right" fill="#12ee5f" opacity={0.6} barSize={2} name="Put OI" />
+
+                    {/* 1. On Expiry Area (Green/Red fill) */}
+                    <Area 
+                        type="linear" 
+                        dataKey="payoff" 
+                        yAxisId="left" 
+                        stroke="none" 
+                        fill="url(#splitColor)" 
+                        name="On Expiry Fill" 
+                        legendType="none"
+                    />
+
+                    {/* 2. On Expiry Line (Green for profit, red for loss) */}
+                    <Line
+                        type="linear"
+                        dataKey="payoff"
+                        yAxisId="left"
+                        stroke={(d) => d.payoff >= 0 ? "#06f05c" : "#f30b0b"}
+                        strokeWidth={1.5}
+                        dot={false}
+                        name="On Expiry"
+                    />
+
+                    {/* 3. T+0 Line (The Sensibull Blue Curve) */}
+                    <Line 
+                        type="monotone" 
+                        dataKey="currentPayoff" 
+                        yAxisId="left" 
+                        stroke="#2563eb" 
+                        strokeWidth={2} 
+                        dot={false} 
+                        name="On Target Date" 
+                    />
+                </ComposedChart>
             </ResponsiveContainer>
         </div>
     );
@@ -935,19 +1091,10 @@ function App() {
                     </div>
 
                     {data.payoffCurve && (
-                        <div className="h-96 w-full">
-                            <ResponsiveContainer>
-                                <LineChart data={data.payoffCurve}>
-                                    <CartesianGrid strokeDasharray="3 3" />
-                                    <XAxis dataKey="spot" tick={{ fill: '#888' }} />
-                                    <YAxis tick={{ fill: '#888' }} />
-                                    <Tooltip contentStyle={{ backgroundColor: theme === 'dark' ? '#1f2937' : '#fff' }} />
-                                    <ReferenceLine y={0} stroke="#666" strokeDasharray="3 3" />
-                                    {isLiveMode && liveData && <ReferenceLine x={liveData.spot} stroke="#007bff" label="Spot" />}
-                                    <Line type="monotone" dataKey="payoff" stroke="#8884d8" dot={false} strokeWidth={2} />
-                                </LineChart>
-                            </ResponsiveContainer>
-                        </div>
+                        <SensibullPayoffChart 
+                            data={data.payoffCurve} 
+                            spot={isLiveMode && liveData ? liveData.spot : form.stockPrice || form.strike} 
+                        />
                     )}
                 </div>
             )}
