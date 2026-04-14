@@ -22,6 +22,23 @@ const getSymbolKey = (symbol) => {
     return symbol;
 };
 
+// --- NEW: Matches Backend Strike Width Logic ---
+const getSensibullConfigUI = (symbolKey) => {
+    const s = (symbolKey || 'NIFTY').toUpperCase();
+    if (s.includes('BANKNIFTY') || s.includes('NIFTY BANK')) return { width: 500, interval: 100 };
+    if (s.includes('FINNIFTY') || s.includes('FINANCIAL')) return { width: 200, interval: 50 };
+    if (s.includes('MIDCP') || s.includes('MIDCAP')) return { width: 100, interval: 25 };
+    if (s.includes('SENSEX')) return { width: 400, interval: 100 };
+    if (s.includes('RELIANCE')) return { width: 20, interval: 10 };
+    if (s.includes('HDFCBANK')) return { width: 10, interval: 5 };
+    if (s.includes('ICICIBANK')) return { width: 20, interval: 10 };
+    if (s.includes('SBIN')) return { width: 10, interval: 10 };
+    if (s.includes('INFY')) return { width: 40, interval: 100 };
+    if (s.includes('TCS')) return { width: 20, interval: 10 };
+    if (s.includes('BHARATIARTL')) return { width: 20, interval: 10 };
+    return { width: 200, interval: 50 }; // Default for NIFTY 50
+};
+
 // --- LIVE CANDLE CHART COMPONENT ---
 const LiveCandleChart = ({ data }) => {
     if (!data || data.length === 0) return (
@@ -217,15 +234,10 @@ const findAtmStrike = (spot, symbolKey) => {
 const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolKey) => {
     const newForm = { ...currentForm };
     const resolvedKey = getSymbolKey(symbolKey);
-    // Reuse logic from findAtmStrike for increment consistency
-    let increment = 50;
-    if (resolvedKey && SYMBOL_STRIKE_INCREMENT[resolvedKey]) {
-        increment = SYMBOL_STRIKE_INCREMENT[resolvedKey];
-    } else {
-         if (atmStrike < 500) increment = 5;
-         else if (atmStrike < 1500) increment = 10;
-         else if (atmStrike < 5000) increment = 20;
-    }
+    
+    // Pull the width configuration
+    const config = getSensibullConfigUI(resolvedKey);
+    const width = config.width; // <-- THIS fixes the mismatch
 
     switch (currentStrategy) {
         case 'long-call': case 'long-put': case 'short-call': case 'short-put': 
@@ -234,26 +246,26 @@ const autoFillPrimaryStrikes = (currentForm, currentStrategy, atmStrike, symbolK
         case 'calendar-spread':
             newForm.strike = atmStrike; break;
         case 'bull-call-spread': case 'bear-call-spread': case 'call-ratio-spread':
-            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike + increment; break;
+            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike + width; break;
         case 'bull-put-spread': case 'bear-put-spread':
-            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike - increment; break;
+            newForm.strike1 = atmStrike; newForm.strike2 = atmStrike - width; break;
         case 'long-strangle': case 'short-strangle':
-            newForm.strike1 = atmStrike - increment; newForm.strike2 = atmStrike + increment; break;
+            newForm.strike1 = atmStrike - width; newForm.strike2 = atmStrike + width; break;
         case 'call-butterfly': case 'iron-butterfly':
-            newForm.strike1 = atmStrike - increment; 
+            newForm.strike1 = atmStrike - width; 
             newForm.strike2 = atmStrike;            
-            newForm.strike3 = atmStrike + increment; 
+            newForm.strike3 = atmStrike + width; 
             break;
         case 'jade-lizard':
-            newForm.strike1 = atmStrike - increment;       
-            newForm.strike2 = atmStrike + increment;       
-            newForm.strike3 = atmStrike + (2 * increment); 
+            newForm.strike1 = atmStrike - width;       
+            newForm.strike2 = atmStrike + width;       
+            newForm.strike3 = atmStrike + (2 * width); 
             break;
         case 'iron-condor':
-            newForm.strike1 = atmStrike - (2 * increment); 
-            newForm.strike2 = atmStrike - increment;
-            newForm.strike3 = atmStrike + increment; 
-            newForm.strike4 = atmStrike + (2 * increment); 
+            newForm.strike1 = atmStrike - (2 * width); 
+            newForm.strike2 = atmStrike - width;
+            newForm.strike3 = atmStrike + width; 
+            newForm.strike4 = atmStrike + (2 * width); 
             break;
         case 'protective-put': case 'protective-call':
             newForm.stockPrice = atmStrike; newForm.strike = atmStrike; break;
