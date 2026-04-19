@@ -1417,38 +1417,84 @@ async function fetchMarketDataWithGreeks(symbol, targetExpiryTs = null) {
 async function executeTradeInternal(payload) {
     const { strategy, decisionData } = payload;
     const executedLegs = [];
+    let allLegsSuccessful = true;
 
-    for (const leg of decisionData.legs) {
+    // 1. MARGIN OPTIMIZATION: Sort legs to BUY before SELL
+    // This ensures hedges are in place before shorting, reducing margin requirements.
+    const buyLegs = decisionData.legs.filter(l => l.action === 'BUY' || l.action === 'buy');
+    const sellLegs = decisionData.legs.filter(l => l.action === 'SELL' || l.action === 'sell');
+    const sortedLegs = [...buyLegs, ...sellLegs];
+
+    console.log(`[${TRADE_MODE} MODE] Initializing execution for: ${strategy}`);
+
+    for (const leg of sortedLegs) {
         try {
-            let actualSymbol = leg.symbol || leg.greeks?.symbol; 
+            const actualSymbol = leg.symbol || leg.greeks?.symbol;
             const cleanSymbol = actualSymbol.replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '');
-            const correctLotSize = getLotSizeForSymbol(cleanSymbol); 
-            const quantity = (leg.qty || 1) * (correctLotSize || 1);
+            const lotSize = getLotSizeForSymbol(cleanSymbol);
+            const quantity = (leg.qty || 1) * (lotSize || 1);
             const entryPrice = leg.price || leg.greeks?.ltp || 0;
 
-            const newPosition = {
-                orderId: `AUTO-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+            if (TRADE_MODE === 'LIVE') {
+                // --- LIVE EXECUTION ---
+                const side = (leg.action.toUpperCase() === 'BUY') ? 1 : -1;
+                const orderResult = await placeLiveOrder(actualSymbol, quantity, side);
+
+                if (orderResult.s !== 'ok') {
+                    allLegsSuccessful = false;
+                    throw new Error(`Exchange Rejected ${actualSymbol}: ${orderResult.message}`);
+                }
+                
+                // Add a small delay between legs for Fyers margin processing
+                await new Promise(resolve => setTimeout(resolve, 350));
+            }
+
+            // --- RECORD POSITION (Used for both LIVE and PAPER) ---
+            executedLegs.push({
+                orderId: TRADE_MODE === 'LIVE' ? `LIVE-${Date.now()}` : `PAPER-${Date.now()}-${Math.floor(Math.random()*1000)}`,
                 instrument: actualSymbol,
                 buyPrice: entryPrice,
                 qty: quantity,
-                action: leg.action,
+                action: leg.action.toUpperCase(),
                 strategy: strategy,
                 strike: leg.strike,
                 type: leg.type || leg.optionType,
                 timestamp: new Date(),
-                pnl: 0
-            };
-            executedLegs.push(newPosition);
-        } catch (e) { console.error(`❌ Leg Failed: ${e.message}`); }
+                pnl: 0,
+                mode: TRADE_MODE
+            });
+
+        } catch (e) {
+            console.error(`❌ Execution Failed on leg ${leg.strike}: ${e.message}`);
+            allLegsSuccessful = false;
+            break; // Stop the loop immediately
+        }
     }
 
-    if (executedLegs.length > 0) {
-        livePositions = [...livePositions, ...executedLegs]; 
-        algoState.isInTrade = true;
-        broadcast({ type: 'STATUS', message: `✅ Auto-Trade: ${strategy}` });
-        return { success: true, positions: executedLegs };
+    // 2. CRITICAL: ROLLBACK MECHANISM
+    // If one leg fails in LIVE mode, we must close the other successful legs to avoid naked risk.
+    if (!allLegsSuccessful && TRADE_MODE === 'LIVE' && executedLegs.length > 0) {
+        console.warn("⚠️ STRATEGY BREACH: Reverting successful legs to prevent unhedged risk...");
+        for (const leg of executedLegs) {
+            const exitSide = (leg.action === 'BUY') ? -1 : 1;
+            await placeLiveOrder(leg.instrument, leg.qty, exitSide);
+        }
+        throw new Error("Strategy Deployment Failed: All legs were automatically reverted.");
     }
-    throw new Error("Execution failed: No legs valid.");
+
+    // 3. COMMIT TO STATE
+    if (allLegsSuccessful && executedLegs.length > 0) {
+        livePositions = [...livePositions, ...executedLegs];
+        algoState.isInTrade = true;
+        
+        const statusMsg = `✅ ${TRADE_MODE} Trade Deployed: ${strategy}`;
+        broadcast({ type: 'STATUS', message: statusMsg });
+        console.log(statusMsg);
+        
+        return { success: true, mode: TRADE_MODE, positions: executedLegs };
+    }
+
+    return { success: false, reason: "No legs executed or execution halted." };
 }
 
 //=================================================================
